@@ -95,6 +95,11 @@ ACP_CLIENT_CAPABILITIES: dict = {
 # ── ACP Backend Identifiers ──
 
 ACP_BACKEND_CLAUDE = "claude"
+# Public pluggable-provider backend (issue #1693): a bundled Python ACP-server
+# adapter (``kiro_crew.acp_adapters.litellm_server``) that wraps LiteLLM to reach
+# Ollama / OpenAI-compatible endpoints / Amazon Bedrock. Selected when
+# ``agent.provider`` is one of ollama|openai_compatible|bedrock.
+ACP_BACKEND_LITELLM = "litellm"
 
 # ── Claude backend permission modes ──
 # Values an edition writes into a per-session settings.local.json

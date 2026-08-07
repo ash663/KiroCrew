@@ -456,6 +456,28 @@ _MANAGED_MCP_SERVERS: dict[str, dict] = {
 }
 
 
+def managed_mcp_acp_entries() -> list[dict[str, object]]:
+    """The managed Kiro Crew MCP servers as ACP ``session/new`` array elements.
+
+    kiro-cli discovers these via the ``--agent`` spec, but ACP backends that do
+    NOT read that spec (the LiteLLM adapter, issue #1693; and the dormant claude
+    seam) must be handed their tools explicitly in ``session/new``. This returns
+    the same core / cron / computer servers in the ACP element shape
+    (``{name, command, args, env:[{name, value}]}``). User-declared and
+    edition-contributed (``_extra_mcp_servers``) MCP servers are a documented
+    follow-on for the LiteLLM adapter.
+    """
+    acp_env = [{"name": k, "value": v} for k, v in _managed_mcp_env().items()]
+    entries: list[dict[str, object]] = []
+    for name, spec in _MANAGED_MCP_SERVERS.items():
+        fn = spec.get("invocation_fn")
+        if not callable(fn):
+            continue
+        cmd, args = fn()
+        entries.append({"name": name, "command": cmd, "args": list(args), "env": list(acp_env)})
+    return entries
+
+
 def _extra_mcp_servers() -> dict[str, dict]:
     """Edition-contributed MCP servers from the active PlatformContext.
 
@@ -2743,9 +2765,7 @@ def ensure_agent_materialized(agent: str | None) -> bool:
         rebuild_agent_config()
         return agent_file.exists()
     except Exception:
-        logger.warning(
-            "ensure_agent_materialized failed for agent %r", agent, exc_info=True
-        )
+        logger.warning("ensure_agent_materialized failed for agent %r", agent, exc_info=True)
         return False
 
 

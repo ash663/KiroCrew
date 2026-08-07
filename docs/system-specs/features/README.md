@@ -17,3 +17,4 @@ single subsystem belongs in [../modules/](../modules/README.md) instead.
 | [turn-stats-footer.md](turn-stats-footer.md) | The per-turn token and timing footer. |
 | [code-approvers.md](code-approvers.md) | Tier routing for code review approvers. |
 | [claude-code-provider.md](claude-code-provider.md) | The removed standalone provider, kept as the record of what the KiroACP-only collapse took out. |
+| [pluggable-providers.md](pluggable-providers.md) | Selecting the agent model provider — Ollama/local, Bedrock, and OpenAI-compatible endpoints behind a LiteLLM ACP adapter. |

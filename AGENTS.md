@@ -74,10 +74,17 @@ This repo is the de-Amazoned public fork of an internal package. Never re-add:
 - **Keep these stubbed** (public symbols preserved as no-ops so the import graph
   holds): `sso_status.py`, `browser/auth.py`, `dashboard/handlers/sso_login.py`,
   `tunnel/manager.py`, `aim_agents.py`.
-- **Other providers.** Kiro Crew is KiroACP-only: `agent.provider` is fixed to
-  `acp` and kiro-cli is REQUIRED. Keep the dormant `ACP_BACKEND_CLAUDE` /
-  `_is_claude` seam in `acp/client.py` so an internal companion can re-register
-  Claude Code; do NOT re-add the public registration glue.
+- **Other providers.** `agent.provider` is user-selectable as of #1693: `acp`
+  (kiro-cli, the DEFAULT and the only fully-featured path) plus `ollama`,
+  `openai_compatible` and `bedrock`, which route through the bundled LiteLLM ACP
+  adapter behind the optional `providers` extra. kiro-cli remains REQUIRED for
+  the default path. The non-`acp` providers are deliberately partial — no
+  file/shell tools, no system prompt, no compaction (see
+  `docs/system-specs/features/pluggable-providers.md`) — so do NOT treat them as
+  a general replacement for KiroACP, and do not widen them without updating that
+  spec. Keep the dormant `ACP_BACKEND_CLAUDE` / `_is_claude` seam in
+  `acp/client.py` so an internal companion can re-register Claude Code; do NOT
+  re-add the public registration glue for Claude Code specifically.
 - **OSS-flipped defaults:** always-on in-process embeddings, Piper TTS by default,
   a default-open Slack enterprise gate, lazy STT extras.
 - **Fork UX divergences:** the Channels app is hidden from the App Store and the

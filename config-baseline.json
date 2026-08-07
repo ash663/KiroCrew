@@ -21,8 +21,14 @@
         "role_efforts": {},
         "reasoning_effort": "",
         "provider": "acp",
+        "base_url": "",
+        "api_key_env": "",
+        "bedrock": {
+          "profile": "",
+          "region": ""
+        },
         "default_agent": "",
-        "sandbox": "off",
+        "sandbox": "auto",
         "sandbox_allow_no_isolation": false,
         "sandbox_allow_unsandboxed_exec": false,
         "apps_allow_third_party": false,
@@ -194,12 +200,88 @@
       "sensitive": false,
       "tags": [],
       "label": "Provider",
-      "help": "LLM provider backend (KiroACP / kiro-cli).",
+      "help": "LLM provider backend for the agent. 'acp' drives kiro-cli (default, unchanged). 'ollama', 'openai_compatible', and 'bedrock' route the agent through the bundled LiteLLM ACP adapter and require the optional extra: pip install 'kirocrew[providers]'. For 'bedrock', use the REGIONAL INFERENCE PROFILE id (the `us.`-prefixed form, e.g. 'us.amazon.nova-micro-v1:0'): a bare model id is rejected for on-demand throughput. LIMITATIONS of the non-'acp' providers: the adapter reaches only the managed MCP tools (spawn / messaging / artifacts / skills / cron / computer), so the agent CANNOT read or write files or run shell commands — those are kiro-cli built-ins with no MCP equivalent. It also gets no Kiro Crew system prompt, and keeps conversation history in memory with no compaction, so a long run eventually exhausts the context window and a restart loses the history. Prefer 'acp' unless you specifically need a local, Bedrock, or OpenAI-compatible model.",
       "hasChildren": false,
       "enumValues": [
-        "acp"
+        "acp",
+        "ollama",
+        "openai_compatible",
+        "bedrock"
       ],
       "defaultValue": "acp"
+    },
+    {
+      "path": "agent.base_url",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Provider Base URL",
+      "help": "Base URL for the 'ollama' / 'openai_compatible' providers (e.g. http://localhost:11434). Ignored by 'acp' and 'bedrock'.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "agent.api_key_env",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "API Key Env Var",
+      "help": "NAME of the environment variable holding the provider API key (never the key itself). Read at spawn for 'openai_compatible' and authenticated 'ollama' endpoints. Local Ollama needs none.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "agent.bedrock",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Bedrock",
+      "help": "Amazon Bedrock settings, used when provider == 'bedrock'.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "profile": "",
+        "region": ""
+      }
+    },
+    {
+      "path": "agent.bedrock.profile",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Bedrock AWS Profile",
+      "help": "AWS named profile for Bedrock. Empty uses the standard AWS credential chain (env / instance role / default profile).",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "agent.bedrock.region",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Bedrock Region",
+      "help": "AWS region for Bedrock (e.g. us-east-1). Empty defers to the AWS_REGION / profile default.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
     },
     {
       "path": "agent.default_agent",
@@ -224,13 +306,13 @@
       "sensitive": false,
       "tags": [],
       "label": "Sandbox",
-      "help": "Sandbox mode for ACP provider. Default 'off' defers isolation to kiro-cli's internal agent sandbox (kiro-cli >= 2.13). Set to 'auto' to re-enable Kiro Crew's OS-level sandbox (namespace on Linux, sandbox-exec on macOS). The two layers are mutually exclusive on macOS (nested seatbelt causes EPERM).",
+      "help": "Sandbox mode for ACP provider. Default 'auto' engages OS-level isolation (namespace on Linux, sandbox-exec on macOS) and automatically defers to kiro-cli's internal sandbox on macOS when it is enabled (kiro-cli >= 2.13; nested seatbelt causes EPERM). Set to 'off' to skip Kiro Crew's own OS-level sandbox — delegation to kiro-cli's internal sandbox still fires on macOS if it is enabled, and a SECURITY warning is logged when neither layer is active.",
       "hasChildren": false,
       "enumValues": [
         "auto",
         "off"
       ],
-      "defaultValue": "off"
+      "defaultValue": "auto"
     },
     {
       "path": "agent.sandbox_allow_no_isolation",

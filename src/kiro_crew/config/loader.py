@@ -775,6 +775,40 @@ DEFAULT_CWD_ALLOWED_ROOTS = [
 
 
 @dataclass
+class BedrockConfig:
+    """Amazon Bedrock connection settings for ``agent.provider == "bedrock"``."""
+
+    profile: str = field(
+        default="",
+        metadata=_meta(
+            "Bedrock AWS Profile",
+            "AWS named profile for Bedrock. Empty uses the standard AWS "
+            "credential chain (env / instance role / default profile).",
+        ),
+    )
+    region: str = field(
+        default="",
+        metadata=_meta(
+            "Bedrock Region",
+            "AWS region for Bedrock (e.g. us-east-1). Empty defers to the "
+            "AWS_REGION / profile default.",
+        ),
+    )
+
+
+def _coerce_bedrock(raw: object) -> "BedrockConfig":
+    """Coerce loaded config data into a :class:`BedrockConfig`."""
+    if isinstance(raw, BedrockConfig):
+        return raw
+    if isinstance(raw, dict):
+        return BedrockConfig(
+            profile=str(raw.get("profile", "") or ""),
+            region=str(raw.get("region", "") or ""),
+        )
+    return BedrockConfig()
+
+
+@dataclass
 class AgentConfig:
     approval_mode: str = field(
         default="auto",
@@ -822,7 +856,50 @@ class AgentConfig:
     )
     provider: str = field(
         default="acp",
-        metadata=_meta("Provider", "LLM provider backend (KiroACP / kiro-cli).", enum=["acp"]),
+        metadata=_meta(
+            "Provider",
+            "LLM provider backend for the agent. 'acp' drives kiro-cli "
+            "(default, unchanged). 'ollama', 'openai_compatible', and 'bedrock' "
+            "route the agent through the bundled LiteLLM ACP adapter and "
+            "require the optional extra: pip install 'kirocrew[providers]'. "
+            "For 'bedrock', use the REGIONAL INFERENCE PROFILE id (the "
+            "`us.`-prefixed form, e.g. 'us.amazon.nova-micro-v1:0'): a bare "
+            "model id is rejected for on-demand throughput. "
+            "LIMITATIONS of the non-'acp' providers: the adapter reaches only "
+            "the managed MCP tools (spawn / messaging / artifacts / skills / "
+            "cron / computer), so the agent CANNOT read or write files or run "
+            "shell commands — those are kiro-cli built-ins with no MCP "
+            "equivalent. It also gets no Kiro Crew system prompt, and keeps "
+            "conversation history in memory with no compaction, so a long run "
+            "eventually exhausts the context window and a restart loses the "
+            "history. Prefer 'acp' unless you specifically need a local, "
+            "Bedrock, or OpenAI-compatible model.",
+            enum=["acp", "ollama", "openai_compatible", "bedrock"],
+        ),
+    )
+    base_url: str = field(
+        default="",
+        metadata=_meta(
+            "Provider Base URL",
+            "Base URL for the 'ollama' / 'openai_compatible' providers "
+            "(e.g. http://localhost:11434). Ignored by 'acp' and 'bedrock'.",
+        ),
+    )
+    api_key_env: str = field(
+        default="",
+        metadata=_meta(
+            "API Key Env Var",
+            "NAME of the environment variable holding the provider API key "
+            "(never the key itself). Read at spawn for 'openai_compatible' and "
+            "authenticated 'ollama' endpoints. Local Ollama needs none.",
+        ),
+    )
+    bedrock: BedrockConfig = field(
+        default_factory=BedrockConfig,
+        metadata=_meta(
+            "Bedrock",
+            "Amazon Bedrock settings, used when provider == 'bedrock'.",
+        ),
     )
     default_agent: str = field(
         default="",
@@ -2174,7 +2251,7 @@ class DashboardConfig:
         default="auto",
         metadata=_meta(
             "Tips Model",
-            "Model ID for tips generation. Defaults to \"auto\" so it inherits the "
+            'Model ID for tips generation. Defaults to "auto" so it inherits the '
             "account's governed model; a hardcoded id can be rejected on accounts "
             "or partitions that do not serve it.",
         ),
@@ -2417,7 +2494,7 @@ class SkillsConfig:
         metadata=_meta(
             "Skill Judge Model",
             "Model used for the dedupe judge and the advisory pending review. "
-            "Defaults to \"auto\" to inherit the account's governed model; the "
+            'Defaults to "auto" to inherit the account\'s governed model; the '
             "value only gates whether the judge runs (any truthy value enables "
             "it) — the judge turn itself runs on the shared background session.",
         ),
@@ -2682,7 +2759,12 @@ _SECURITY_BOUNDED_FIELDS: tuple[tuple[str, str, int, int], ...] = (
     ("agent", "max_subagents", 0, SUBAGENT_AUTO_MAX_CEILING),
     ("agent", "subagent_max_turns", 1, SUBAGENT_MAX_TURNS_CEILING),
     ("agent", "chat_turn_timeout_secs", CHAT_TURN_TIMEOUT_MIN, CHAT_TURN_TIMEOUT_MAX),
-    ("dashboard", "loop_stall_exit_after_secs", LOOP_STALL_EXIT_AFTER_MIN, LOOP_STALL_EXIT_AFTER_MAX),
+    (
+        "dashboard",
+        "loop_stall_exit_after_secs",
+        LOOP_STALL_EXIT_AFTER_MIN,
+        LOOP_STALL_EXIT_AFTER_MAX,
+    ),
     ("session", "pool_size", 0, POOL_SIZE_MAX),
 )
 
@@ -4574,6 +4656,9 @@ class KiroCrewConfig:
                 role_efforts=coerce_role_efforts(agent_data.get("role_efforts")),
                 reasoning_effort=agent_data.get("reasoning_effort", ""),
                 provider=agent_data.get("provider", "acp"),
+                base_url=agent_data.get("base_url", ""),
+                api_key_env=agent_data.get("api_key_env", ""),
+                bedrock=_coerce_bedrock(agent_data.get("bedrock")),
                 default_agent=agent_data.get("default_agent", ""),
                 sandbox=agent_data.get("sandbox", "auto"),
                 sandbox_allow_no_isolation=bool(
@@ -4610,12 +4695,8 @@ class KiroCrewConfig:
                 subagent_spawn_stagger_secs=_safe_float(
                     agent_data.get("subagent_spawn_stagger_secs", 2.0), 2.0
                 ),
-                resource_pressure_gb=_safe_float(
-                    agent_data.get("resource_pressure_gb", 4.0), 4.0
-                ),
-                resource_critical_gb=_safe_float(
-                    agent_data.get("resource_critical_gb", 2.0), 2.0
-                ),
+                resource_pressure_gb=_safe_float(agent_data.get("resource_pressure_gb", 4.0), 4.0),
+                resource_critical_gb=_safe_float(agent_data.get("resource_critical_gb", 2.0), 2.0),
                 subagent_max_turns=agent_data.get("subagent_max_turns", 100),
                 subagent_timeout_secs=agent_data.get("subagent_timeout_secs", 1800),
                 subagent_stall_idle_secs=_safe_int(
@@ -4772,13 +4853,15 @@ class KiroCrewConfig:
                 ),
                 auto_add_documents=_read_auto_add_documents(knowledge_data),
                 auto_register_project_docs=bool(
-                    knowledge_data.get("auto_register_project_docs", True)),
+                    knowledge_data.get("auto_register_project_docs", True)
+                ),
                 auto_ingest_chunk_budget=_safe_nonnegative_int(
                     knowledge_data.get("auto_ingest_chunk_budget", 150), 150),
                 folder_ingest_chunk_budget=_safe_nonnegative_int(
                     knowledge_data.get("folder_ingest_chunk_budget", 300), 300),
                 dedup_every_n_sweeps=_safe_nonnegative_int(
-                    knowledge_data.get("dedup_every_n_sweeps", 12), 12),
+                    knowledge_data.get("dedup_every_n_sweeps", 12), 12
+                ),
                 doc_ingest_hosts=[
                     str(h)
                     for h in knowledge_data.get("doc_ingest_hosts", [])
@@ -5176,9 +5259,7 @@ class KiroCrewConfig:
                 archive_after_days=_safe_int(skills_data.get("archive_after_days", 90), 90),
                 pending_ttl_days=_safe_int(skills_data.get("pending_ttl_days", 30), 30),
                 generate_scripts=bool(skills_data.get("generate_scripts", True)),
-                judge_model=str(
-                    skills_data.get("judge_model", "auto") or "auto"
-                ),
+                judge_model=str(skills_data.get("judge_model", "auto") or "auto"),
                 extra_paths=[
                     p for p in _safe_list(skills_data.get("extra_paths")) if isinstance(p, str)
                 ],
@@ -5442,15 +5523,46 @@ class KiroCrewConfig:
 
         return creds
 
+    def _litellm_provider_env(self) -> dict[str, str]:
+        """Env vars handed to the bundled LiteLLM ACP adapter (issue #1693).
+
+        The adapter reads these at spawn. ``agent.model`` is the source of truth
+        for the model (a provider-native id). The API key is resolved from the
+        NAMED env var in ``agent.api_key_env`` — the secret itself never lives in
+        config. Empty values are dropped so the adapter's own defaults apply.
+        """
+        a = self.agent
+        model = "" if a.model == DEFAULT_MODEL else a.model
+        env: dict[str, str] = {
+            "KIROCREW_LLM_PROVIDER": a.provider,
+            "KIROCREW_LLM_MODEL": model,
+            "KIROCREW_LLM_BASE_URL": a.base_url,
+            "KIROCREW_LLM_BEDROCK_PROFILE": a.bedrock.profile,
+            "KIROCREW_LLM_BEDROCK_REGION": a.bedrock.region,
+        }
+        if a.api_key_env:
+            env["KIROCREW_LLM_API_KEY_ENV"] = a.api_key_env
+            key = os.environ.get(a.api_key_env, "")
+            if key:
+                env["KIROCREW_LLM_API_KEY"] = key
+        return {k: v for k, v in env.items() if v}
+
     def create_provider_factory(self) -> Callable:
         """Return a factory that creates LLMProvider instances from config.
 
-        KiroCrew is KiroACP-only: the sole provider is the ACP adapter driving
-        the kiro-cli backend. The factory accepts an optional ``session_key`` to
-        create a per-session subdirectory under ``workspace_root()``.
+        Every provider is served by the ACP adapter: ``agent.provider="acp"``
+        drives the kiro-cli backend (the default and only fully-featured path),
+        while ollama / openai_compatible / bedrock drive the bundled LiteLLM
+        adapter via ``acp_backend=ACP_BACKEND_LITELLM``. The factory accepts an
+        optional ``session_key`` to create a per-session subdirectory under
+        ``workspace_root()``.
         """
+        # circular import: importing kiro_crew.acp.types at module scope pulls
+        # acp/__init__ -> acp.client -> hooks -> webhooks -> config.loader, which
+        # fails on a partially initialized module. Both stay function-local.
+        from kiro_crew.acp.types import ACP_BACKEND_LITELLM
         from kiro_crew.providers.acp import (
-            AcpProvider,  # circular: acp -> client -> session -> config.loader
+            AcpProvider,  # circular import: acp -> client -> session -> config.loader
         )
 
         model = self.agent.model
@@ -5464,6 +5576,17 @@ class KiroCrewConfig:
         # has never touched the effort control still starts at the user's
         # configured default instead of the provider/model default.
         default_effort = self.agent.reasoning_effort
+
+        # Pluggable model providers (issue #1693): a non-"acp" provider routes
+        # the agent through the bundled LiteLLM ACP-server adapter. The backend
+        # id flips AcpClient._spawn to launch the adapter instead of kiro-cli,
+        # and all backend config travels via env (merged into each provider's
+        # extra_env below). "acp" leaves the historical kiro-cli path unchanged.
+        _llm_backend = ""
+        _llm_env: dict[str, str] = {}
+        if self.agent.provider in ("ollama", "openai_compatible", "bedrock"):
+            _llm_backend = ACP_BACKEND_LITELLM
+            _llm_env = self._litellm_provider_env()
 
         # MCP gateway: resolve overlay + socket once when enabled. None when
         # the feature flag is off -> AcpClient falls through to per-session MCP.
@@ -5523,7 +5646,11 @@ class KiroCrewConfig:
             # …) are DISTINCT real kiro models and must pass through unchanged,
             # not get folded to Sonnet the way the claude_code path downgrades
             # them (the claude backend has no Haiku).
-            m = model_registry.to_acp_id(m) if m else m
+            # For the LiteLLM backend the model is a provider-native id (e.g.
+            # "qwen3:32b", "anthropic.claude-3-5-sonnet-…") — never a kiro
+            # canonical key — so skip the kiro-id translation.
+            if not _llm_backend:
+                m = model_registry.to_acp_id(m) if m else m
             # Thread the slot's effort into a per-model override so the kiro
             # cli.json overlay is written from it at spawn — without this, a
             # kiro cold start (or the handler's reset-then-respawn) would only
@@ -5541,6 +5668,11 @@ class KiroCrewConfig:
             _eff = reasoning_effort_override or base_effort
             if m and _eff and is_valid_effort(_eff) and model_supports_effort(m):
                 _eff_per_model[m] = _eff
+            _merged_env = (
+                {**_llm_env, **extra_env}
+                if (_llm_env and extra_env)
+                else (extra_env or (_llm_env or None))
+            )
             return AcpProvider(
                 work_dir=wdir,
                 model=m,
@@ -5548,12 +5680,13 @@ class KiroCrewConfig:
                 sandbox_mode=sandbox,
                 session_key=session_key,
                 channel_id=channel_id,
-                extra_env=extra_env,
+                extra_env=_merged_env,
                 effort_per_model=_eff_per_model,
                 tool_search=tool_search,
                 mcp_gateway_overlay=_gw_overlay,
                 mcp_gateway_settings_mcp_json=_gw_settings,
                 mcp_gateway_socket=_gw_socket,
+                acp_backend=_llm_backend,
             )
 
         return _acp

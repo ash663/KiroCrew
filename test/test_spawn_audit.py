@@ -138,6 +138,13 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
     {
         "acp/runtime.py::_get_rss_mb",
         "acp/runtime.py::_get_rss_tree_mb",
+        # NOT a subprocess spawn: the AST heuristic matches ``asyncio.run`` (attr
+        # ``run`` on base ``asyncio``) in the module-level ``if __name__ ==
+        # "__main__"`` entrypoint, which drives the adapter's own stdio serve
+        # loop in-process. No child process is created, and the litellm / mcp
+        # backends are lazy-imported inside methods rather than spawned.
+        # Same classification as the other ``asyncio.run`` sites in this list.
+        "acp_adapters/litellm_server.py::<module>",
         # Console-entry self-heal for stale editable installs: ONE fixed
         # `python -m pip install -e <repo>` argv, no shell. The repo path is
         # derived from the module's own __file__ (never user/agent input) and

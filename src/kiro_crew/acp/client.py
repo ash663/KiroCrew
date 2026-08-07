@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import glob
+import importlib.util
 import json
 import logging
 import os
@@ -45,6 +46,7 @@ from kiro_crew.acp.liveness import VERDICT_UNKNOWN, VERDICT_WORKING, LivenessOra
 from kiro_crew.acp.prompt_blocks import build_prompt_blocks
 from kiro_crew.acp.types import (
     ACP_BACKEND_CLAUDE,
+    ACP_BACKEND_LITELLM,
     ACP_CLIENT_CAPABILITIES,
     EVENT_AGENT_SWITCHED,
     EVENT_CLEAR_STATUS,
@@ -97,7 +99,7 @@ from kiro_crew.acp.types import (
     JsonRpcRequest,
     TurnUsage,
 )
-from kiro_crew.agent import ensure_agent_materialized
+from kiro_crew.agent import ensure_agent_materialized, managed_mcp_acp_entries
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.constants import KIROCREW_SPAWNED_ENV, KIROCREW_SPAWNED_VALUE
 from kiro_crew.env import augmented_path, resolve_krb5_ccname
@@ -132,6 +134,10 @@ DEFAULT_MODEL = "auto"
 
 KIRO_CLI_BIN = "kiro-cli"
 KIRO_CLI_SUBCMD = "acp"
+
+# Pluggable-provider backend (issue #1693): the bundled LiteLLM ACP-server
+# adapter, launched as ``python -m <this>`` with the current interpreter.
+LITELLM_ADAPTER_MODULE = "kiro_crew.acp_adapters.litellm_server"
 
 CLAUDE_ACP_BIN = "claude-agent-acp"
 # On-disk name of the Claude backend CLI.  The claude-agent-acp adapter
@@ -900,9 +906,7 @@ def _model_is_unentitled(data: str, available_models: Sequence[str] | None) -> s
     return rejected
 
 
-def _is_transient_raw_error(
-    error: object, available_models: Sequence[str] | None = None
-) -> bool:
+def _is_transient_raw_error(error: object, available_models: Sequence[str] | None = None) -> bool:
     """True iff a raw ACP JSON-RPC ``error`` is a retryable transient backend
     failure (Bedrock 5xx / throttle / model-unavailable rollout) rather than an
     auth/validation/unknown error that a retry cannot fix.
@@ -1815,6 +1819,11 @@ class AcpClient:
     def _is_claude(self) -> bool:
         return self.backend == ACP_BACKEND_CLAUDE
 
+    @property
+    def _is_litellm(self) -> bool:
+        """True when this client drives the bundled LiteLLM ACP adapter (#1693)."""
+        return self.backend == ACP_BACKEND_LITELLM
+
     def _pooled_mcp_servers(self) -> list[dict[str, Any]]:
         """Broker-stub ``mcpServers`` entries for this session's ``session/new``.
 
@@ -1823,9 +1832,7 @@ class AcpClient:
         servers — nothing is written to the user's project or to
         ``~/.kiro/agents/``. Empty when the shared gateway is disabled.
         """
-        return pooled_session_servers(
-            self._mcp_gateway_overlay, self._agent, self._channel_id
-        )
+        return pooled_session_servers(self._mcp_gateway_overlay, self._agent, self._channel_id)
 
     def _claude_session_mcp_servers(self) -> list:
         """MCP server array passed to a claude ``session/new`` / ``session/load``.
@@ -1839,6 +1846,37 @@ class AcpClient:
         session would have zero MCP tools.
         """
         return []
+
+    async def _litellm_session_mcp_servers(self) -> list:
+        """MCP servers injected into the LiteLLM adapter's ``session/new`` (#1693).
+
+        Like the claude seam, the LiteLLM adapter does not read the kiro
+        ``--agent`` spec, so without this it would have zero tools. Inject
+        Kiro Crew's managed core servers (core / cron / computer) in ACP shape.
+        This is the adapter's ONLY tool source, and it is narrower than kiro-cli's:
+        there is no MCP equivalent of kiro-cli's built-in fs_read / fs_write /
+        execute_bash, so a local / Bedrock / OpenAI-compatible model cannot read
+        files or run commands (see
+        docs/system-specs/features/pluggable-providers.md). Empty for every other
+        backend.
+
+        ``async`` + ``asyncio.to_thread`` because ``managed_mcp_acp_entries()``'s
+        cold path does synchronous filesystem traversal and executable lookup.
+        Awaiting it inline on the gateway loop stalls every other chat and
+        heartbeat task for the duration of a session start. Mirrors
+        ``_pooled_mcp_servers``, which is offloaded at its call sites for the
+        same reason.
+        """
+        if not self._is_litellm:
+            return []
+        try:
+            return await asyncio.to_thread(managed_mcp_acp_entries)
+        except Exception:
+            logger.warning(
+                "failed to build managed MCP servers for the litellm adapter",
+                exc_info=True,
+            )
+            return []
 
     @property
     def is_ready(self) -> bool:
@@ -2083,9 +2121,7 @@ class AcpClient:
         # backend never loaded (would fault with "Mode '<agent>' not found").
         # Assigned unconditionally so a re-init that omits `modes` clears any
         # stale state rather than guarding on it.
-        self._available_mode_ids, _current_mode, self._modes_advertised = (
-            parse_session_modes(resp)
-        )
+        self._available_mode_ids, _current_mode, self._modes_advertised = parse_session_modes(resp)
 
     def _handle_config_option_update(self, msg: JsonRpcMessage) -> None:
         """Process a config_option_update session notification.
@@ -2200,6 +2236,34 @@ class AcpClient:
                     f"script."
                 )
             argv: list[str] = claude_argv
+        elif self._is_litellm:
+            # Public pluggable-provider backend (issue #1693). Launch the
+            # bundled LiteLLM ACP-server adapter with THIS interpreter so
+            # kiro_crew + litellm resolve from the same install. `-u` keeps the
+            # JSON-RPC stdio pipe unbuffered. All provider config (model,
+            # base_url, api key, bedrock profile/region) rides self._extra_env,
+            # merged into the child env below by the factory.
+            #
+            # Fail fast HERE rather than at the first prompt: selecting a
+            # non-"acp" provider is valid config on a base install, so without
+            # this the adapter spawns cleanly, the session opens, and the user
+            # only discovers the missing extra when their first message dies
+            # inside the turn. Checked in the parent (importlib.util.find_spec,
+            # no import cost) so the message names the fix.
+            if importlib.util.find_spec("litellm") is None:
+                raise AcpError(
+                    f"agent.provider is {self._extra_env.get('KIROCREW_LLM_PROVIDER', '?')!r} "
+                    "but the 'litellm' package is not installed. Install the extra: "
+                    "pip install 'kirocrew[providers]' — or set agent.provider "
+                    'back to "acp".'
+                )
+            if not (self._extra_env or {}).get("KIROCREW_LLM_MODEL"):
+                raise AcpError(
+                    f"agent.provider is {self._extra_env.get('KIROCREW_LLM_PROVIDER', '?')!r} "
+                    "but agent.model is empty. A non-\"acp\" provider has no model "
+                    'default — set agent.model (e.g. "qwen3:32b" for ollama).'
+                )
+            argv = [sys.executable, "-u", "-m", LITELLM_ADAPTER_MODULE]
         else:
             try:
                 kiro_bin = await _resolve_kiro_bin_for_spawn()
@@ -2223,8 +2287,11 @@ class AcpClient:
         argv, self._sandbox_cleanup = wrap_argv(
             argv,
             mode=self._sandbox_mode,
-            strip_python_env=True,
-            is_kiro_cli=not self._is_claude,
+            # The LiteLLM adapter is `python -m …` from THIS install: keep its
+            # interpreter env (PYTHONPATH/PYTHONHOME) so kiro_crew + litellm
+            # import. Only kiro-cli's foreign MCP subprocesses need the strip.
+            strip_python_env=not self._is_litellm,
+            is_kiro_cli=not (self._is_claude or self._is_litellm),
         )
         # cgroup v2 scope (OUTERMOST): bound this agent + all its MCP-server /
         # tool descendants with pids.max (fork bomb) + memory.max (RSS balloon).
@@ -2302,8 +2369,7 @@ class AcpClient:
             env=env,
             start_new_session=platform_compat.IS_POSIX,
             creationflags=(
-                platform_compat.CREATE_NEW_PROCESS_GROUP
-                | platform_compat._SUBPROCESS_NO_WINDOW
+                platform_compat.CREATE_NEW_PROCESS_GROUP | platform_compat._SUBPROCESS_NO_WINDOW
             ),
             profile=RLIMIT_PROFILE_SESSION_HOST,
         )
@@ -2605,6 +2671,7 @@ class AcpClient:
             # how pooling takes effect without writing a spec anywhere.
             "mcpServers": [
                 *self._claude_session_mcp_servers(),
+                *(await self._litellm_session_mcp_servers()),
                 *(await asyncio.to_thread(self._pooled_mcp_servers)),
             ],
         }
@@ -2701,9 +2768,7 @@ class AcpClient:
                 session_file = ""
                 file_ok = True
             else:
-                session_file = str(
-                    kiro_sessions_dir() / f"{resume_sid}.json"
-                )
+                session_file = str(kiro_sessions_dir() / f"{resume_sid}.json")
                 file_ok = Path(session_file).exists()
             if file_ok:
                 try:
@@ -2718,6 +2783,7 @@ class AcpClient:
                         # resumed session keeps talking to the broker.
                         "mcpServers": [
                             *self._claude_session_mcp_servers(),
+                            *(await self._litellm_session_mcp_servers()),
                             *(await asyncio.to_thread(self._pooled_mcp_servers)),
                         ],
                     }
@@ -2795,7 +2861,10 @@ class AcpClient:
             except OSError:
                 self._jsonl_pos = 0
 
-        # 4. Activate agent via set_mode (claude-agent-acp does not support set_mode — skip).
+        # 4. Activate agent via set_mode. Kiro-cli ONLY: claude-agent-acp does not
+        #    support set_mode, and the LiteLLM adapter has no ~/.kiro/agents specs
+        #    to activate — an "agent mode" is a kiro-cli concept, so demanding one
+        #    of the adapter would fail every session at initialize.
         #    Guard (A): fire only when the backend advertised this agent, or
         #    advertised no modes at all (older kiro-cli / fake → attempt,
         #    backward-compatible). If modes ARE advertised but this agent is
@@ -2804,7 +2873,7 @@ class AcpClient:
         #    default (broader) mode, which for a restricted agent is a privilege
         #    escalation. Self-heal (B, in _spawn) regenerates the managed default
         #    so the common case never reaches this branch.
-        if not self._is_claude:
+        if not self._is_claude and not self._is_litellm:
             if not self._modes_advertised or self._agent in self._available_mode_ids:
                 await self._send_request(
                     METHOD_SET_MODE,
@@ -4966,9 +5035,7 @@ class AcpClient:
             # Trusted tool name recovered from the preceding tool_call, mirroring
             # mcp_server_name — lets the app-own-server auto-approve govern the
             # canonical mcp__<server>__<tool> on this permission path.
-            tool_name=(
-                self._tool_call_tool_name.get(tool_call_id, "") if tool_call_id else ""
-            ),
+            tool_name=(self._tool_call_tool_name.get(tool_call_id, "") if tool_call_id else ""),
         )
 
     def _backfill_context_window(self, pct: float) -> None:

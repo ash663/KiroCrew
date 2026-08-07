@@ -1,8 +1,10 @@
 ## LLM Provider Abstraction
 
 KiroCrew drives a single LLM backend: `kiro-cli` over ACP. The `LLMProvider`
-interface is retained as a thin seam (consumers depend only on the ABC), but
-there is exactly one concrete provider — `agent.provider` is fixed to `acp`.
+interface is retained as a thin seam (consumers depend only on the ABC).
+`agent.provider` selects the backend: `acp` (default) drives `kiro-cli`, while
+`ollama` / `openai_compatible` / `bedrock` route the agent through the bundled
+LiteLLM ACP adapter (see [`features/pluggable-providers.md`](../features/pluggable-providers.md)).
 
 ### Architecture
 
@@ -118,8 +120,12 @@ glue or a provider selector (see the repo-root `CLAUDE.md`).
 }
 ```
 
-- `agent.provider` is fixed to `"acp"` (enum `["acp"]`); there is no provider to choose.
-- `create_provider_factory()` returns a `Callable` that creates the kiro-cli `AcpProvider`.
+- `agent.provider` (enum `["acp", "ollama", "openai_compatible", "bedrock"]`)
+  selects the backend; `acp` is the default kiro-cli path.
+- `create_provider_factory()` returns a `Callable` that creates an `AcpProvider`.
+  For a non-`acp` provider it sets `acp_backend="litellm"` and threads
+  `KIROCREW_LLM_*` env so `AcpClient._spawn` launches the LiteLLM ACP adapter
+  (`kiro_crew.acp_adapters.litellm_server`) instead of kiro-cli.
 
 ### MCP Server Registration
 

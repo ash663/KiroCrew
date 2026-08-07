@@ -24,6 +24,7 @@ from kiro_crew.acp.session_handle import AcpSessionHandle
 from kiro_crew.acp.session_provider import AcpSessionProvider
 from kiro_crew.acp.types import (
     ACP_BACKEND_CLAUDE,
+    ACP_BACKEND_LITELLM,
     EVENT_COMPACTION_STATUS,
     STOP_REASON_CANCELLED,
     STOP_REASON_END_TURN,
@@ -284,7 +285,7 @@ class AcpProvider(LLMProvider):
         # True/False = write the kiro settings overlay deterministically so the
         # KiroCrew toggle is authoritative over any global kiro setting.
         self._tool_search = tool_search
-        if not self.is_claude_backend:
+        if self.is_kiro_cli_backend:
             # Recover overlay-persisted levels (server-restart resilience) and
             # write the overlay BEFORE the first spawn so kiro-cli reads it on
             # session/new. Caller-provided overrides win — only fill gaps.
@@ -317,15 +318,43 @@ class AcpProvider(LLMProvider):
         return self._client.backend == ACP_BACKEND_CLAUDE
 
     @property
+    def is_litellm_backend(self) -> bool:
+        """True when this provider drives the bundled LiteLLM adapter (#1693)."""
+        return self._client.backend == ACP_BACKEND_LITELLM
+
+    @property
+    def is_kiro_cli_backend(self) -> bool:
+        """True ONLY for the kiro-cli backend.
+
+        Distinct from ``not is_claude_backend``: a third backend (the LiteLLM
+        adapter) is also not-claude, but is equally not kiro-cli. Everything
+        kiro-cli-SPECIFIC — the ``cli.json`` effort / Tool Search overlays, the
+        ``/effort`` slash command, ``stream_command``, and the multiplexed
+        AcpRuntime — must key on THIS, not on the absence of claude, or it gets
+        misapplied to the adapter.
+        """
+        return not self.is_claude_backend and not self.is_litellm_backend
+
+    @property
+    def uses_legacy_client(self) -> bool:
+        """True when this backend runs on AcpClient — one process per session.
+
+        Both the Claude backend and the LiteLLM adapter are hosted this way;
+        only kiro-cli is hosted by the multiplexed AcpRuntime.
+        """
+        return not self.is_kiro_cli_backend
+
+    @property
     def is_session_sharing_eligible(self) -> bool:
         """True when this provider can host multiplexed subagent sessions.
 
         Session sharing requires the kiro-cli backend (which supports N
-        concurrent sessions per process via AcpRuntime demux). The Claude
-        Code backend uses AcpClient (one process per session) and is never
-        eligible, so subagents fall back to the legacy per-process path.
+        concurrent sessions per process via AcpRuntime demux). The Claude Code
+        backend and the LiteLLM adapter both use AcpClient (one process per
+        session) and are never eligible, so subagents fall back to the legacy
+        per-process path.
         """
-        return not self.is_claude_backend
+        return self.is_kiro_cli_backend
 
     async def _start_kiro_runtime(self) -> None:
         """Spawn an AcpRuntime + session; time the kiro cold-start split.
@@ -755,11 +784,12 @@ class AcpProvider(LLMProvider):
     def _apply_effort_overlay(self) -> None:
         """Write the kiro workspace cli.json overlay for (current model, effort).
 
-        No-op for the claude backend (it uses live set_config_option) and when
-        the model is not effort-capable or no level resolves. Called before
-        every (re)spawn so resume/restart keeps the same level.
+        No-op for any non-kiro-cli backend (claude uses live set_config_option;
+        the LiteLLM adapter reads no ``cli.json``) and when the model is not
+        effort-capable or no level resolves. Called before every (re)spawn so
+        resume/restart keeps the same level.
         """
-        if self.is_claude_backend:
+        if not self.is_kiro_cli_backend:
             return
         model = self._client._model
         level = self._resolve_effort()
@@ -774,11 +804,11 @@ class AcpProvider(LLMProvider):
     def _apply_tool_search_overlay(self) -> None:
         """Write the kiro Tool Search setting into the workspace cli.json overlay.
 
-        No-op for the claude backend (Tool Search is a kiro-cli feature) and
-        when no toggle value was supplied (``self._tool_search is None``).
+        No-op for any non-kiro-cli backend (Tool Search is a kiro-cli feature)
+        and when no toggle value was supplied (``self._tool_search is None``).
         Called before every (re)spawn so resume/restart keeps the same setting.
         """
-        if self.is_claude_backend or self._tool_search is None:
+        if not self.is_kiro_cli_backend or self._tool_search is None:
             return
         try:
             _write_tool_search_overlay(self._client._work_dir, self._tool_search)
@@ -866,6 +896,13 @@ class AcpProvider(LLMProvider):
         if self.is_claude_backend and not self._client.supports_config_option("effort"):
             logger.info("change_effort skipped — claude-agent-acp build exposes no 'effort' option")
             return False
+        # The LiteLLM adapter has no effort surface at all: it advertises no
+        # config options, and `/effort` is a kiro-cli slash command it would
+        # answer with "method not found". Report unsupported rather than pushing
+        # a command it cannot honour.
+        if self.is_litellm_backend:
+            logger.info("change_effort skipped — the LiteLLM adapter exposes no effort control")
+            return False
         # Accept any level the dynamic validation set knows about — ACP backends
         # can report levels beyond the canonical five (effort.py), and those are
         # already admitted by the dropdown, the API validator and persistence.
@@ -892,7 +929,7 @@ class AcpProvider(LLMProvider):
             # Roll back to the prior state before propagating to the caller.
             if _prev is None:
                 self._effort_per_model.pop(model, None)
-                if not self.is_claude_backend:
+                if self.is_kiro_cli_backend:
                     _clear_cli_overlay_effort(self._client._work_dir, model)
             else:
                 self._effort_per_model[model] = _prev
@@ -905,7 +942,7 @@ class AcpProvider(LLMProvider):
             "ACP effort live-changed: model=%s effort=%s backend=%s",
             model,
             level,
-            "claude" if self.is_claude_backend else "kiro",
+            self._client.backend or "kiro",
         )
         return True
 
@@ -930,9 +967,14 @@ class AcpProvider(LLMProvider):
         if not model_supports_effort(model):
             return False
         self._effort_per_model.pop(model, None)
-        if self.is_claude_backend:
-            # No live "reset to default" — caller must reset the session.
-            logger.info("ACP effort cleared (claude); session reset needed for default")
+        if not self.is_kiro_cli_backend:
+            # No live "reset to default" on either non-kiro-cli backend — the
+            # caller must reset the session. (claude: no reset op; the LiteLLM
+            # adapter: no effort surface at all.)
+            logger.info(
+                "ACP effort cleared (%s); session reset needed for default",
+                self._client.backend or "kiro",
+            )
             return False
         # kiro: clear/rewrite the overlay so a respawn doesn't re-apply it.
         level = self._resolve_effort()  # workspace default, or None
@@ -953,14 +995,19 @@ class AcpProvider(LLMProvider):
         self._apply_effort_overlay()
         self._apply_tool_search_overlay()
 
-        if not self.is_claude_backend:
+        if self.is_kiro_cli_backend:
             # ── Kiro unified path: AcpRuntime + AcpSessionHandle ──
             # Spawn a runtime, create/resume a session, wrap in
             # AcpSessionProvider. One process hosts parent + all subagent
             # sessions (session sharing).
             await self._start_kiro_runtime()
         else:
-            # ── CC path: legacy AcpClient (unchanged) ──
+            # ── AcpClient path: claude-agent-acp and the LiteLLM adapter ──
+            # One process per session. AcpClient._spawn picks the right child
+            # from the backend id, so this covers the bundled LiteLLM adapter
+            # (#1693) as well as CC. Routing it down _start_kiro_runtime()
+            # instead would spawn kiro-cli and silently send the prompt to the
+            # kiro backend rather than the configured provider.
             await self._client.ensure_ready()
 
         await self._apply_initial_effort()
@@ -1033,15 +1080,16 @@ class AcpProvider(LLMProvider):
             yield self._to_llm_event(e)
 
     async def stream_command(self, command: str) -> AsyncIterator[LLMEvent]:
-        # claude-agent-acp does not implement the kiro-only
+        # Neither non-kiro-cli backend implements the kiro-only
         # _kiro.dev/commands/execute method — route slash commands through
         # session/prompt, which the claude backend interprets natively for its
-        # SDK-supported commands (/compact, /help, /model, /context, …).
+        # SDK-supported commands (/compact, /help, /model, /context, …) and the
+        # LiteLLM adapter simply treats as prompt text.
         # Commands the SDK doesn't recognise (kiro-only ones like /agent,
         # /experiment, /hooks) flow through as conversational prompt text;
         # this is a softer failure mode than the previous -32601
         # "Method not found" hard error.
-        if self.is_claude_backend:
+        if not self.is_kiro_cli_backend:
             async for e in self._client.stream_events(command):
                 yield self._to_llm_event(e)
             return
