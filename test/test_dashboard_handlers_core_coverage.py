@@ -1777,6 +1777,57 @@ class TestAgentSettingsPut:
         assert seeded_config.read_text(encoding="utf-8") == "<<not json>>"
 
     @pytest.mark.asyncio
+    async def test_a_stale_plaintext_on_disk_does_not_brick_an_unrelated_put(
+        self, seeded_config, fake_sel
+    ) -> None:
+        """A plaintext ``agent.deepseek_env`` value an older build landed is not this
+        write's doing: the publish floor lets a write that leaves the mapping as it
+        found it through (naming the stale key on the log), so a settings change
+        that never touched that field is a 200, not a 500 with a traceback."""
+        stale = {"DEEPSEEK_API_KEY": "sk-live-not-a-reference"}
+        seeded_config.write_text(
+            json.dumps({"agent": {"approval_mode": "auto", "deepseek_env": stale}}) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        async with TestClient(TestServer(_agent_cfg_app())) as client:
+            resp = await _put_agent(client, {"subagent_max_turns": 5})
+            assert resp.status == 200
+        written = json.loads(seeded_config.read_text(encoding="utf-8"))
+        assert written["agent"]["subagent_max_turns"] == 5
+        assert written["agent"]["deepseek_env"] == stale, "the write left the mapping as it was"
+
+    @pytest.mark.asyncio
+    async def test_a_write_the_publish_floor_refuses_is_a_clean_coded_400(
+        self, seeded_config, fake_sel, monkeypatch
+    ) -> None:
+        """When the floor does refuse a document, the PUT arm answers the operator's
+        one-line instruction with a machine-readable code -- never an escaped
+        ``ValueError``. The field is not editable through this surface today, so the
+        refusal is raised the way the floor raises it rather than provoked through
+        the body."""
+        from kiro_crew.config import loader as loader_mod
+        from kiro_crew.config.loader import ConfigWriteRefused
+
+        message = (
+            "agent.deepseek_env entry 'DEEPSEEK_API_KEY' holds a literal value, so the "
+            "config write was refused: this mapping takes a 'secret://<vault name>' "
+            "reference only."
+        )
+
+        def refuse(*_args, **_kwargs):
+            raise ConfigWriteRefused(message)
+
+        monkeypatch.setattr(loader_mod, "update_config_locked", refuse)
+        async with TestClient(TestServer(_agent_cfg_app())) as client:
+            resp = await _put_agent(client, {"subagent_max_turns": 5})
+            assert resp.status == 400
+            body = await resp.json()
+            assert body["code"] == "config_write_refused"
+            assert body["error"] == message
+        assert fake_sel.log_api_access.call_args.kwargs["outcome"] == "denied"
+
+    @pytest.mark.asyncio
     async def test_out_of_range_turns_is_denied(self, seeded_config, fake_sel) -> None:
         async with TestClient(TestServer(_agent_cfg_app())) as client:
             resp = await _put_agent(client, {"subagent_max_turns": SUBAGENT_MAX_TURNS_CEILING + 1})

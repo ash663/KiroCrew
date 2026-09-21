@@ -54,6 +54,7 @@ from kiro_crew.instances.constants import (
     RECOVER_BACKOFF_MAX_CEILING_SECS as _RECOVER_BACKOFF_CEILING,
 )
 from kiro_crew.instances.constants import WARM_SET_CAP_AUTO as _WARM_SET_CAP_AUTO
+from kiro_crew.mcp_gateway.secret_uri import SECRET_URI_PREFIX
 from kiro_crew.stt.limits import DEFAULT_IDLE_EVICT_SECS as _STT_DEFAULT_IDLE_EVICT_SECS
 from kiro_crew.stt.limits import DEFAULT_PARTIAL_INTERVAL_MS as _STT_DEFAULT_PARTIAL_INTERVAL_MS
 from kiro_crew.stt.limits import DEFAULT_SILENCE_MS as _STT_DEFAULT_SILENCE_MS
@@ -188,6 +189,61 @@ def coerce_role_efforts(raw: object) -> dict[str, str]:
         if isinstance(val, str) and val.strip() and is_valid_effort(val.strip()):
             out[role] = val.strip()
     return out
+
+
+def deepseek_env_plaintext_keys(raw: object) -> tuple[str, ...]:
+    """Env-var names in an ``agent.deepseek_env`` shape whose value is NOT a reference.
+
+    The one rule about this mapping that is enforced at WRITE time rather than at
+    spawn: a value is a ``secret://<vault name>`` reference, and anything else is a
+    provider key about to be persisted in ``config.json`` — the exposure the whole
+    route exists to avoid. ``write_config_atomically`` refuses to publish a document
+    whose write INTRODUCES one, or changes the mapping while one stays in it
+    (:class:`kiro_crew.config.loader.ConfigWriteRefused`), so a plaintext typed into
+    ``config set`` never reaches disk; a plaintext an older build already landed,
+    left untouched by a write to some other field, publishes with the key named on
+    the log, and the spawn-time validator repeats the check as the second line for
+    a file edited by hand.
+
+    Returns NAMES only, sorted, never values: the result is destined for an error
+    message that must be safe on a terminal and in a log. A non-dict shape has no
+    entries and returns empty; :func:`coerce_deepseek_env` is what drops it.
+    """
+    if not isinstance(raw, dict):
+        return ()
+    return tuple(
+        sorted(
+            str(key)
+            for key, value in raw.items()
+            if not (isinstance(value, str) and value.startswith(SECRET_URI_PREFIX))
+        )
+    )
+
+
+def coerce_deepseek_env(raw: object) -> dict[str, str]:
+    """Normalize ``agent.deepseek_env`` to a plain env-var-name -> value mapping.
+
+    TYPE coercion ONLY, and that split is deliberate. What a name may BE for this
+    mapping — a POSIX identifier, inside the harness's own child-environment scrub
+    class, not a name Kiro Crew or the harness owns — is checked at SPAWN, in the
+    DeepSeek arm, where a bad entry REFUSES the session with a message naming the
+    offending env-var key (``acp/client.py``). Dropping such an entry here instead
+    would hand the operator a harness with no provider key, a config file whose
+    entry silently disappeared on the next write, and no error naming why. So the
+    only thing refused here is a shape the dataclass cannot hold. The VALUE rule —
+    a ``secret://`` reference, never a plaintext key — is the exception, enforced
+    earlier still, at the publish floor (:func:`deepseek_env_plaintext_keys`),
+    because a plaintext that reaches disk is already the defect.
+
+    Nothing is stripped either: a name with surrounding whitespace is not a POSIX
+    identifier, and the spawn-time refusal says so by name rather than quietly
+    repairing it into a different variable than the operator wrote.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value for key, value in raw.items() if isinstance(key, str) and isinstance(value, str)
+    }
 
 
 def coerce_effort(raw: object) -> str:
@@ -980,6 +1036,29 @@ class AgentConfig:
         default="",
         metadata=_meta("Default Agent", "Default agent name for new sessions."),
     )
+    deepseek_env: dict[str, str] = field(
+        default_factory=dict,
+        metadata=_meta(
+            "DeepSeek Harness provider keys",
+            "Provider keys handed to the DeepSeek Harness ('deepseek' backend) as "
+            "environment variables at spawn, mapping an environment-variable NAME "
+            "to a 'secret://<vault name>' reference. The harness resolves a "
+            "provider credential from its inherited environment above its own "
+            "credential files, so this is how it reaches a hosted model without "
+            "Kiro Crew leaving those files readable inside the sandbox. Store the "
+            "key under Settings > Secrets, then map it here, e.g. "
+            '{"DEEPSEEK_API_KEY": "secret://my-dsh-key"}. Any provider name the '
+            "harness knows works (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...). A "
+            "plaintext value is REFUSED at write time -- the config write itself "
+            "fails, so no credential is ever stored in config.json -- and so, at "
+            "spawn, is a name the harness would forward to its own shell "
+            "children, a name Kiro Crew owns, or one Kiro Crew's agent "
+            "environment scrub strips; the DeepSeek session is refused before it "
+            "starts with a message naming the offending key. Empty means no key: "
+            "a model served locally on this machine needs none. Ignored by every "
+            "other backend.",
+        ),
+    )
     sweep_agents_backups: bool = field(
         default=False,
         metadata=_meta(
@@ -1757,6 +1836,10 @@ class AgentConfig:
         # feeds coerced input.
         self.role_models = coerce_role_models(self.role_models)
         self.role_efforts = coerce_role_efforts(self.role_efforts)
+        # Same defensive TYPE coercion for the DeepSeek provider-key map. What its
+        # names and values may BE is refused at spawn, by name -- see
+        # coerce_deepseek_env.
+        self.deepseek_env = coerce_deepseek_env(self.deepseek_env)
         # Same defensive coercion for the throttle-fallback model: normalize to
         # ""/"auto"/acp id, so consumers can trust the stored shape.
         self.fallback_model = coerce_fallback_model(self.fallback_model)

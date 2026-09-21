@@ -2008,14 +2008,17 @@ async def api_kirocrew_config(request: web.Request) -> web.Response:
     if request.method == "PUT":
         caller = request.get("user", "dashboard")
 
-        def _deny(error: str, status: int = 400) -> web.Response:
+        def _deny(error: str, status: int = 400, *, code: str | None = None) -> web.Response:
             _sel().log_api_access(
                 caller=caller,
                 operation="config.update",
                 outcome="denied",
                 error=error,
             )
-            return web.json_response({"error": error}, status=status)
+            payload: dict[str, str] = {"error": error}
+            if code is not None:
+                payload["code"] = code
+            return web.json_response(payload, status=status)
 
         try:
             body = await request.json()
@@ -2031,7 +2034,11 @@ async def api_kirocrew_config(request: web.Request) -> web.Response:
         # offloaded to a thread so it neither races concurrent writers (lost-write
         # bug) nor blocks the event loop (event-loop-stall bug).  This mirrors the
         # pattern used by the sibling PATCH handler (~line 2031).
-        from kiro_crew.config.loader import ConfigReadError, update_config_locked  # noqa: F811
+        from kiro_crew.config.loader import (  # noqa: F811
+            ConfigReadError,
+            ConfigWriteRefused,
+            update_config_locked,
+        )
         from kiro_crew.dashboard.handlers.agents import _get_config_lock  # noqa: F811
 
         # Carry the validation error and result out of the mutate callback.
@@ -2142,6 +2149,13 @@ async def api_kirocrew_config(request: web.Request) -> web.Response:
                         {"error": "config.json is corrupt", "code": "config_corrupt"},
                         status=500,
                     )
+                except ConfigWriteRefused as exc:
+                    # The publish floor refused the document this write would land
+                    # (a plaintext ``agent.deepseek_env`` value the write introduces
+                    # or keeps while changing that mapping). The message names
+                    # env-var keys only, never the value, and is the same
+                    # instruction the CLI prints; nothing reached disk.
+                    return _deny(str(exc), 400, code="config_write_refused")
 
                 if _validation_error:
                     msg, status = _validation_error[0]
@@ -2682,7 +2696,12 @@ def _tailnet_governance_pinned_off() -> bool:
 
 async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
     """PATCH /api/config/kirocrew — update a single config field."""
-    from kiro_crew.config.loader import ConfigReadError, config_path, update_config_locked
+    from kiro_crew.config.loader import (
+        ConfigReadError,
+        ConfigWriteRefused,
+        config_path,
+        update_config_locked,
+    )
 
     caller = request.get("user")
     if not caller:
@@ -2996,6 +3015,15 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
         except ConfigReadError:
             _log_sel("error", f"{path_key}=read_failed")
             return web.json_response({"error": "failed to read config file"}, status=500)
+        except ConfigWriteRefused as exc:
+            # A ``ValueError`` too, so it must be caught before the arm below: the
+            # publish floor refusing a plaintext ``agent.deepseek_env`` value is the
+            # operator's own input being declined (400), not a server failure, and
+            # the message -- env-var keys only, never the value -- is the instruction.
+            _log_sel("denied", f"{path_key}=write_refused")
+            return web.json_response(
+                {"error": str(exc), "code": "config_write_refused"}, status=400
+            )
         except ValueError as exc:
             _log_sel("error", f"{path_key}=section_not_dict")
             return web.json_response({"error": str(exc)}, status=500)

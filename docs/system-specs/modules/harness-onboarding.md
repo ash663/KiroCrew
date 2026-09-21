@@ -342,10 +342,10 @@ to be fencing your credential before Stage 7 lets an operator choose you.
 
 | Field | What it commits the host to |
 |---|---|
-| `entitlement_source` | One of `host_identity_store` or `own_credential_file`. The doctor row and the logout policy branch on it, so a third spelling fails a test rather than reading as a harness nobody has an answer for; a harness entitled by the ambient cloud environment adds the third when it exists. |
+| `entitlement_source` | One of `host_identity_store`, `own_credential_file` or `host_vault`. The doctor row and the logout policy branch on it, so a fourth spelling fails a test rather than reading as a harness nobody has an answer for; a harness entitled by the ambient cloud environment adds the fourth when it exists. `host_vault` means Crew holds the key and hands it to your process as an environment variable at spawn — pick it only when the harness genuinely resolves its credential from the inherited environment AND withholds that class of variable from the children it spawns itself, both verified against the harness rather than assumed. |
 | `credential_leaves` | The home-relative leaves you STORE, spliced onto the read-gate floor so an agent's file tools can read none of them. Empty when your entitlement is the host store: those locations are the host's, declared in `identity_stores.py`, and re-declaring them would hand a driver a say over the host's own store. |
 | `home_override_env_vars` | The variables that relocate your credential `$HOME`. Every declared leaf is re-anchored under each of them, which is what keeps a relocated token fenced. |
-| `adapter_own_leaves` | The leaf your own child must still read. A SUBSET of `credential_leaves`, and enforced as one: a driver may only ask the mask to spare a leaf its own declaration put on the floor, and `__post_init__` raises otherwise. Know what you are declaring: the spared leaf is readable by the harness's shell too (same process tree, and the shell gate matches no paths by design), so this is the operator's token for that vendor exposed to the model — the posture every enforced harness ships today, tracked in #10438. Declare `()` if the harness can authenticate without the file (a keyless local model; Linux presents a masked file as empty) and say so in `sign_in_remedy`. |
+| `adapter_own_leaves` | The leaf your own child must still read. A SUBSET of `credential_leaves`, and enforced as one: a driver may only ask the mask to spare a leaf its own declaration put on the floor, and `__post_init__` raises otherwise. Know what you are declaring: the spared leaf is readable by the harness's shell too (same process tree, and the shell gate matches no paths by design), so this is the operator's token for that vendor exposed to the model — the posture four enforced harnesses ship today, tracked in #10438. **Check first whether you can avoid it.** Declare `()` and `entitlement_source = host_vault` when the harness resolves a credential from its inherited environment and scrubs that class of variable from its own children: Crew then feeds the key from its vault and your credential files stay masked for the whole tree, which is strictly tighter than a carve-out. The DeepSeek Harness is the worked example. Also declare `()` if the harness can authenticate without the file at all (a keyless local model; Linux presents a masked file as empty) and say so in `sign_in_remedy`. |
 | `sign_in_remedy` | A finished sentence, server-owned and rendered verbatim wherever it appears. Untranslated on purpose — a translated per-harness string is a per-harness edit to thirteen locale files by construction, and the harness nobody remembers to add is exactly the one that needs the sentence. |
 | `host_logout_retires_children` | Whether a host logout may retire your already-running children. True only alongside `host_identity_store`; the other pairing is refused, because a logout says nothing about a store you never read. |
 
@@ -555,12 +555,12 @@ fails the one that matters. It is `ACP_BACKENDS_KNOWN` and it is NOT selectable.
 | 2 capability sets | Decided for every set. In the model channel, the effort channel and the advertised-model capture; in the session MCP array, which is the first membership won by a PROBE rather than by the advertisement (it advertises `mcpCapabilities: {"http": true}`, and stdio is ACP v1's baseline rather than an omission — a stdio entry naming an unrunnable command comes back as a failed MCP handshake, so the transport mounted). Out of steer, both compaction sets, the internal sandbox and member dispatch. |
 | 3 spawn path | Done — one binary plus a profile selector, `dsh --profile acp`, resolved override → mise → PATH. The ACP package is a plugin with no executable, so what resolves is the HOST that boots the profile it lives in. |
 | 4 handshake | Done — `PROTOCOL_VERSION_DEEPSEEK`, its own literal, integer `1`, captured off its own wire. |
-| 5 auth declaration | Done — `own_credential_file`, and less auth than any harness so far: `authMethods: []` and an `authenticate` that returns immediate success, so the ACP layer authenticates nothing and the secret it needs is a PROVIDER key. Two leaves on the floor, `~/.dsh/.credentials.yaml` and the `~/.dsh/.env` fallback, `DSH_HOME` re-anchored, `adapter_own_leaves` EMPTY. |
+| 5 auth declaration | Done — `host_vault`, the third entitlement source, constructed here. Less auth than any harness so far at the ACP layer: `authMethods: []` and an `authenticate` that returns immediate success, so that layer authenticates nothing and the secret it needs is a PROVIDER key. Two leaves on the floor, the writable credential file and the `.env` fallback under `DSH_HOME`, re-anchored. `adapter_own_leaves` is EMPTY and stays empty across the routing change: this harness resolves a provider key from its inherited environment above both files, so Crew feeds the key from its own vault (`agent.deepseek_env`) and the mask keeps both leaves for the whole process tree. |
 | 6 install probe | Done — no probe of its own; `_probe_self_served` reads this harness's record, which names `dsh` and `npm i -g @deepseek-ai/dsh`, with `restart_required` from the spawn path's own cache. Naming the HOST binary rather than the ACP package is why the command is data in the record: that package is a plugin with no executable, so advice naming it would not produce a runnable harness. |
-| 7 selectability | **Not selectable.** Named in `NOT_SHIPPED_SELECTABLE` with its reason. |
-| routing | `UNVERIFIED`, on observation rather than for want of looking. |
-| residual | The whole of it. Crew's PreToolUse gate does not run for what a session does, and there is no compensating mask either, because the mask is gated on `ENFORCED_ROUTINGS`. |
-| 8 live spill | Reached, and it is what produced the verdict: a live turn, and a corpus live for six of the seven required classes. The seventh is synthesized, because the harness produced no `session/request_permission` frame in four captures. |
+| 7 selectability | **Selectable**, as of the gate plugin. `NOT_SHIPPED_SELECTABLE` is now empty. |
+| routing | `VERIFIED_GATE_EXTENSION` with `Readback.LOAD_MARKER`. |
+| residual | Two, both named rather than closed. The read-back's witness is Crew's own plugin rather than the harness, because this harness's ACP profile publishes nothing to ask. And the env-fed key is still IN the harness process's environment, so in `danger-full-access` — where the composition mounts no pid-namespace isolation — a shell child could read it out of `/proc`. Escalating to that mode is itself a `session/request_permission` this routing's gate sees, so it is two gated steps rather than the one ungated `open()` a credential carve-out would have left. |
+| 8 live spill | Reached twice. #10373 reached it for six of the seven required classes; the seventh is live now, captured off the same harness with the gate plugin composed. |
 
 Two things this run produced that the checklist did not ask for.
 
@@ -593,30 +593,102 @@ raised a permission request. Do not let a setting's existence stand in for the
 observation — a harness with a permission vocabulary is not the same as a harness
 that asks, and only the wire can tell you which you have.
 
-The onward consequence is worth naming because it is a benefit. `UNVERIFIED` keeps
-this harness outside `ENFORCED_ROUTINGS`, so `adapter_own_leaves` must be empty,
-so it removes nothing from the OS credential deny list for its process tree. A
-harness shipping `bash` with a carve-out is a harness whose shell can `open()` the
-carved-out token; retreating to the honest verdict avoided that by construction
-rather than by a second control.
+The onward consequence was named as a benefit at the time: `UNVERIFIED` kept this
+harness outside `ENFORCED_ROUTINGS`, so `adapter_own_leaves` had to be empty, so it
+removed nothing from the OS credential deny list for its process tree. Enforcing the
+routing turns the mask ON, and the checklist's rule is that an enforced harness must
+name its own token store or be masked out of its own auth — which on a harness
+shipping `bash` would put a carve-out its shell can `open()` back. **It did not have
+to.** The harness's own credential layering resolves a provider key from the
+INHERITED PROCESS ENVIRONMENT above both of its files, and its subprocess layer
+scrubs every inherited name matching `/KEY|PASSWORD|SECRET|TOKEN/i` before spawning
+any child — so Crew feeds the key from its own secret vault
+(`agent.deepseek_env` → `acp/client.py`), declares `entitlement_source =
+host_vault`, and both leaves stay masked for the whole tree. That is what the third
+entitlement source is for, and it is the general lesson: **the rule is "name your
+own leaf OR be fed from the vault", and the second branch is the one to check
+first.** The alternative reading — that enforcement obliges a carve-out — is the one
+that would have shipped the wider posture.
 
-**The unselectable state is conditional, not terminal, and it is worth saying what
-would lift it.** Stage 7 becomes passable when a tool call reaches Kiro Crew's gate
-per call rather than only when the model asks to escalate. Three routes would do it,
-in ascending cost. The harness could route its sandbox's own decision through the
-approval seam instead of deciding it internally, which would make every in-policy
-action ask and put this harness on the same footing as OpenCode — an upstream change,
-and the cheapest if it happens. Or a Kiro Crew plugin could be composed into the
-harness's `approval/request` waterfall as the terminal answerer, which would make
-every request Crew's to decide — that means shipping a plugin into a third-party
-composition, a new kind of artifact for this repository. Or the sandbox mode could be
-pinned to a posture where the actions Crew cares about are all escalations, which is
-the weakest of the three because it depends on the model choosing to ask.
+One more rule rides on that branch: **a property of the harness the vault route rests
+on is VERIFIED at spawn, not mirrored as a constant.** Crew's copy of the scrub class
+(`/KEY|PASSWORD|SECRET|TOKEN/i`) is the validator's first filter for a mapping, but a
+harness release that narrows or drops its scrub would forward the key into every
+shell with no in-band signal. So the read-back probe sets each configured name to a
+canary (never the key — the probe boots a plugin host that needs none), and the gate
+plugin spawns one trivial child through the harness's own `ctx.subprocess` service and
+records per name whether it reached that child; Crew refuses the session when any did,
+when a name was not even set (nothing verified), or when the plugin checked a set
+other than the one Crew configured (`child_env` in the marker, judged by
+`tool_gate._deepseek_child_env_issue`). The check spawns through the harness's OWN
+subprocess seam because the property belongs to that seam — a child spawned any other
+way would say nothing about it.
 
-Until one of those exists the verdict stands. What must NOT happen is the fourth
-route: reading the approval policy back and calling it routed. That verifies a real
-setting about the wrong thing, and it would go green through every gate in this
-document.
+What is left is smaller and differently shaped: the key is in the harness process's
+environment, so in `danger-full-access` (no pid-namespace isolation) a shell child
+could read it through `/proc`. Reaching that mode is itself a
+`session/request_permission` the gate sees, so it costs two gated steps rather than
+one ungated read. An unrouted harness could make neither trade, which is exactly why
+#10373 declined to.
+
+**Stage 7 was lifted by the second of the three routes this section predicted, with
+one correction worth recording.** The prediction was a plugin composed into the
+harness's `approval/request` waterfall "as the terminal answerer, which would make
+every request Crew's to decide". That is the wrong end of the pipeline. The
+harness's ACP bridge is ALREADY an answerer in that waterfall, and answering ahead
+of it would have replaced the frame Crew wants with a decision Crew made locally.
+What was missing was an ASKER: the harness answers its own `tools/pre-execute`
+waterfall (`packages/core/tools`), and a plugin returning `{kind: 'ask'}` there
+makes the harness's tools core resolve the call through `ctx.approval`, which the
+bridge then answers by emitting `session/request_permission`. Crew adds one hop at
+the top and reuses the harness's whole existing path below it, including its
+fail-closed contract on both hops — `ask` "runs only after an approval service
+returns `allowed-once` and otherwise denies", and `ApprovalOutcome` normalizes a
+missing, throwing or non-conforming answerer to `unavailable`. So the artifact is
+smaller than predicted and re-implements none of the harness's own semantics. When
+a route looks like "answer the question Crew cares about", check first whether the
+harness will ASK it given a nudge; the asker seam is usually cheaper and always
+leaves the harness's own fail-closed behaviour in charge.
+
+The load marker verifies the route below that asker as well as the asker itself.
+The probe discards both plugin-controlled output streams and reads only that marker
+through a non-following, nonblocking descriptor. The read accepts a regular file of
+at most 64 KiB, asks for one byte beyond its fstat size to catch growth, and parses
+JSON only after those checks; a link, FIFO, directory, oversize file or changing file
+is the same malformed-marker routing refusal. At marker-write time the plugin
+enumerates the root Cordis bus's
+`approval/request` listeners and records each listener's loader entry id and module
+plus its plugin-runtime name; Crew admits only the singleton owned by
+`@deepseek-ai/dsh-acp`. Cordis exposes no public listener-enumeration API and wraps
+callbacks in reflection proxies, so the root `_hooks` owner context is the strongest
+identity available; a missing or malformed internal shape refuses rather than
+degrading to a name-only check. The marker also records the composed approval
+default, which must be `ask` (no session exists yet, so a per-session override is not
+reachable), and the tool presentation the tools service actually composed
+(`tools.mode`), which must be `native`: the overlay pins it, but the pin winning is a
+layer-ordering fact observed at one version, and the snapshot is what turns it into a
+verified property — a plugin that rewrites the composed mode to `ptc` after the pin
+is refused, as a live run shows. The final `--patch` overlay reasserts the stock
+approval row, policy and enabled ACP row after operator layers. `applyEntryPatches`
+treats each row's `name` as a match guard rather than an assignment, so it cannot
+overwrite a replaced module; the owner read-back is the fail-closed half for that
+case. The marker is the PROBE's alone and is published atomically (written beside its
+path, renamed onto it) because the probe holds the harness's stdin open until it
+exists — stdin EOF is the profile's shutdown, and that shutdown disposes the
+subprocess service the child-env proof spawns through, so an EOF handed over at boot
+would end the proof under itself. The session the probe speaks for names no marker
+path and the plugin skips the write when none is named.
+
+Two things that shape carries for a NEXT harness of the same kind. The read-back is
+a new `Readback` member rather than a new `Routing` one, because the guarantee is
+identical to pi's and only the question differs — and the difference is data beside
+the routing table, so a third harness is a row. And the read-back is honestly the
+weaker of the two: pi's witness is pi's own command registry, while this one is a
+marker Crew's plugin writes, so it attests that Crew's code ran rather than that
+the harness reports it running. That is stated at
+`agent_sdk.backends.Readback.LOAD_MARKER` rather than glossed, because the
+alternative — inventing a private ACP method to ask over — would have broken this
+profile's own declared invariant of adding no method, capability or `_meta` field.
 
 There is one further gap this run recorded rather than closed, in
 `tool_gate.ENFORCED_ROUTINGS`'s own comment: `is_enforced()` answers both "does a

@@ -28,6 +28,7 @@
         "acp_backend": "",
         "member_acp_backend": "kas",
         "default_agent": "",
+        "deepseek_env": {},
         "sweep_agents_backups": false,
         "sandbox": "auto",
         "sandbox_allow_no_isolation": false,
@@ -338,6 +339,34 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": ""
+    },
+    {
+      "path": "agent.deepseek_env",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "DeepSeek Harness provider keys",
+      "help": "Provider keys handed to the DeepSeek Harness ('deepseek' backend) as environment variables at spawn, mapping an environment-variable NAME to a 'secret://<vault name>' reference. The harness resolves a provider credential from its inherited environment above its own credential files, so this is how it reaches a hosted model without Kiro Crew leaving those files readable inside the sandbox. Store the key under Settings > Secrets, then map it here, e.g. {\"DEEPSEEK_API_KEY\": \"secret://my-dsh-key\"}. Any provider name the harness knows works (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...). A plaintext value is REFUSED at write time -- the config write itself fails, so no credential is ever stored in config.json -- and so, at spawn, is a name the harness would forward to its own shell children, a name Kiro Crew owns, or one Kiro Crew's agent environment scrub strips; the DeepSeek session is refused before it starts with a message naming the offending key. Empty means no key: a model served locally on this machine needs none. Ignored by every other backend.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {}
+    },
+    {
+      "path": "agent.deepseek_env.*",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "*",
+      "help": "",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": null
     },
     {
       "path": "agent.sweep_agents_backups",

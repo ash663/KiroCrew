@@ -1277,6 +1277,20 @@ def _raw_config() -> dict:
         return {}
 
 
+class ConfigWriteRefused(ValueError):
+    """A config document was refused at the publish floor and nothing was written.
+
+    Raised by :func:`write_config_atomically` before any byte reaches disk, for
+    content that must never be persisted: today, a provider key in plaintext under
+    ``agent.deepseek_env``, where the only admissible value is a
+    ``secret://<vault name>`` reference (``sections.deepseek_env_plaintext_keys``).
+    The message names env-var KEYS only, never the value, so it is safe to print
+    on a terminal and to log. A ``ValueError`` so the CLI's existing refusal shape
+    applies, and so a caller cannot mistake it for the unreadable-file case
+    :class:`ConfigReadError` names.
+    """
+
+
 class ConfigReadError(Exception):
     """``config.json`` exists but could not be read as a config object.
 
@@ -1328,6 +1342,73 @@ def read_config_for_update(path: Path | None = None) -> dict:
     return raw
 
 
+def _refuse_unpublishable(data: dict, path: Path) -> None:
+    """Refuse *data* if it carries content this write must not land in ``config.json``.
+
+    The publish floor for every writer that lands a config document -- the locked
+    read-modify-write (``update_config_locked``, behind ``config set`` and every
+    dashboard PUT) and the whole-document :meth:`KiroCrewConfig.save` alike -- so
+    the rule holds however a value arrived. One rule today: a provider key typed
+    in plaintext under ``agent.deepseek_env`` is refused, because that mapping
+    takes ``secret://`` references only and a plaintext that reaches disk is
+    already the defect the spawn-time validator would later name. Keyed on the
+    document's SHAPE rather than on the path, so an agent spec written through the
+    same function is untouched -- it has no ``agent.deepseek_env`` to refuse.
+
+    What is refused is what THIS write does: a plaintext it introduces, or a
+    mapping it changes while a plaintext entry stays in it. A plaintext an older
+    build or a hand edit already landed, left exactly as the write found it, is not
+    this write's doing -- every writer in the product reaches this function, most
+    of them for fields nothing to do with this one and with no handler for the
+    refusal, so refusing them all would turn one stale value into an unhandled
+    exception on every Slack allowlist change and every unrelated dashboard write.
+    Such a write publishes, and the stale value is named on the log (keys only,
+    never the value) so it is not silent; the DeepSeek spawn that would use it is
+    still refused by the validator, and a write that does touch the mapping has to
+    remove the plaintext first. The prior document is read from *path*; when it
+    cannot be read the plaintext cannot be shown pre-existing and is refused, so an
+    absent or unparseable file fails closed.
+    """
+    agent = data.get("agent") if isinstance(data, dict) else None
+    mapping = agent.get("deepseek_env") if isinstance(agent, dict) else None
+    plaintext = _sections.deepseek_env_plaintext_keys(mapping)
+    if not plaintext:
+        return
+    names = ", ".join(repr(key) for key in plaintext)
+    if _deepseek_env_on_disk(path) == mapping:
+        logger.warning(
+            "config.json already holds a literal value under agent.deepseek_env entry %s; "
+            "this write left that mapping as it found it. That mapping takes a "
+            "'secret://<vault name>' reference only, and a DeepSeek session is refused "
+            "while it stands: save the key under Settings > Secrets, then map it as "
+            "'secret://<vault name>'.",
+            names,
+        )
+        return
+    raise ConfigWriteRefused(
+        f"agent.deepseek_env entry {names} holds a literal value, so the config "
+        "write was refused: this mapping takes a 'secret://<vault name>' reference "
+        "only, and no provider key is ever stored in config.json. Save the key "
+        "under Settings > Secrets, then map it as 'secret://<vault name>'."
+    )
+
+
+def _deepseek_env_on_disk(path: Path) -> object:
+    """The ``agent.deepseek_env`` value the document at *path* holds, or ``None``.
+
+    Read for :func:`_refuse_unpublishable` alone, to tell a plaintext this write
+    introduces from one it merely re-writes unchanged. ``None`` for an absent,
+    unreadable or unparseable file -- and for a document with no such mapping --
+    which the caller treats as "not shown pre-existing".
+    """
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    agent = document.get("agent") if isinstance(document, dict) else None
+    return agent.get("deepseek_env") if isinstance(agent, dict) else None
+
+
 def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> None:
     """Write a config dict to *path* atomically, PRESERVING its permissions.
 
@@ -1377,6 +1458,7 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     updated the target. Symlinking the config into a dotfiles repo is a normal
     setup, so the target is resolved first to preserve that behavior.
     """
+    _refuse_unpublishable(data, path)
     # Resolve BEFORE stat/write so a symlinked config keeps pointing at its
     # target (and the mode preserved is the target's, not the link's).
     try:
@@ -1643,6 +1725,10 @@ def update_config_locked(
     ConfigReadError
         If the existing config is unreadable or malformed and
         ``on_corrupt="fail"``.
+    ConfigWriteRefused
+        If the mutated document carries content the publish floor never
+        persists (a plaintext value under ``agent.deepseek_env``). Raised
+        before any byte is written; the existing file is untouched.
     OSError
         If the lockfile cannot be opened/created or the lock cannot be acquired
         (including a contended ``wait_for_lock=False`` acquire).
@@ -2566,6 +2652,12 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
         acp_backend=_normalize_acp_backend(agent_data.get("acp_backend")),
         member_acp_backend=_normalize_acp_backend(agent_data.get("member_acp_backend", "kas")),
         default_agent=agent_data.get("default_agent", ""),
+        # Through the module alias rather than a new top-level import: the loader's
+        # ``from ... import`` list is a FROZEN pre-split compatibility snapshot
+        # (``test_config_module_boundaries.test_loader_reexports_historical_snapshot_by_identity``),
+        # so a new name joins it only by being an old one. Same shape as
+        # ``coerce_refusal_fallback_model`` above.
+        deepseek_env=_sections.coerce_deepseek_env(agent_data.get("deepseek_env")),
         sweep_agents_backups=_safe_bool(agent_data.get("sweep_agents_backups", False), False),
         sandbox=agent_data.get("sandbox", "auto"),
         sandbox_allow_no_isolation=bool(agent_data.get("sandbox_allow_no_isolation", False)),

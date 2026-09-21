@@ -62,3 +62,4 @@ test/fixtures/acp_frames/**/*.json text eol=lf
 # checkout bytes, so a CRLF rewrite on a Windows clone would refuse every pi
 # session there and only there. Pin LF like the vendor manifest above.
 src/kiro_crew/agent_sdk/gate_extensions/**/*.ts text eol=lf
+src/kiro_crew/agent_sdk/gate_extensions/**/*.mjs text eol=lf

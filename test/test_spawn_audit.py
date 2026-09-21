@@ -317,6 +317,21 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # directories. Called from a worker thread, never the event loop --
         # ``test/test_acp_pi_backend.py`` pins that.
         "acp/client.py::_verify_pi_gate",
+        # The DeepSeek Harness gate read-back, the same shape as the pi one above:
+        # the argv is the SESSION'S own argv already wrapped by ``wrap_argv_async``
+        # before it reaches this method, so the sandbox and credential mask are
+        # applied by the caller rather than here. Nothing in it is agent-influenced
+        # -- the harness binary comes from its ``ACP_BACKEND_LAUNCH`` row, the sealed
+        # plugin and its patch from the owner-only gate-artifact directory, and the
+        # marker path from the probe's OWN private scratch window (allocated in the
+        # arm, passed as ``extra_private_dirs``, removed in its ``finally``) -- the
+        # one argument the child writes, and it lands nowhere the child could plant
+        # something a later session loads. stdin is a pipe that carries nothing and
+        # is closed once the plugin publishes its marker (EOF is the profile's own
+        # shutdown). The env adds only the operator's configured key NAMES under
+        # canary values, never the key. Called from a worker thread, never the
+        # event loop.
+        "acp/client.py::_verify_deepseek_gate",
         # The subprocess-pool child interpreter: ONE fixed argv, ``sys.executable -S <leaf
         # script>``, where the script is a module-relative constant (tests pass their
         # own stub). No agent value reaches the command, the args or the cwd -- the

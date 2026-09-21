@@ -14,6 +14,7 @@ from kiro_crew import beacon
 from kiro_crew.config import KiroCrewConfig
 from kiro_crew.config.loader import (
     ConfigReadError,
+    ConfigWriteRefused,
     _subtract_overlay,
     config_local_path,
     config_path,
@@ -90,7 +91,15 @@ def _config_cmd(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            update_config_locked(config_path(), mutate=lambda _: data, on_corrupt="reset")
+            try:
+                update_config_locked(config_path(), mutate=lambda _: data, on_corrupt="reset")
+            except ConfigWriteRefused as e:
+                # Third writer behind the publish floor, same report as the keyed
+                # paths: nothing was written, and the message names the offending
+                # env-var key, never its value. Anchored on the file, since there
+                # is no single key to name.
+                print(f"❌ {fp}: {e}", file=sys.stderr)
+                sys.exit(1)
             sel().log_api_access(
                 caller="cli",
                 operation="config_set_file",
@@ -177,9 +186,15 @@ def _config_cmd(args: argparse.Namespace) -> None:
                     _dict_set_create(_existing, key, parsed)
                     return _existing
 
-                update_config_locked(
-                    p, mutate=_mutate_local_overlay, stamp_meta=False, on_corrupt="reset"
-                )
+                try:
+                    update_config_locked(
+                        p, mutate=_mutate_local_overlay, stamp_meta=False, on_corrupt="reset"
+                    )
+                except ConfigWriteRefused as e:
+                    # The publish floor refused the document before writing it; the
+                    # message names the offending env-var key and never its value.
+                    print(f"❌ {key}: {e}", file=sys.stderr)
+                    sys.exit(1)
 
                 sel().log_api_access(
                     caller="cli",
@@ -229,6 +244,11 @@ def _config_cmd(args: argparse.Namespace) -> None:
                         f"❌ Cannot set key in a corrupt config.json: {e}",
                         file=sys.stderr,
                     )
+                    sys.exit(1)
+                except ConfigWriteRefused as e:
+                    # Same shape as the corrupt-file refusal: nothing was written, and
+                    # the message names the offending env-var key, never its value.
+                    print(f"❌ {key}: {e}", file=sys.stderr)
                     sys.exit(1)
                 sel().log_api_access(
                     caller="cli",

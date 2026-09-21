@@ -81,8 +81,19 @@ _RUN_DIR_ARTIFACTS: dict[str, tuple[str, ...]] = {
     # The run sweep accepts pi artifacts as well as sandbox launchers.
     _PI_GATE_ARTIFACT_PREFIX: _PI_GATE_ARTIFACT_SUFFIXES,
 }
+# The DeepSeek Harness gate shares the pi-gate leaf: the sealed plugin
+# (``kirocrew_dsh_gate_<pid>.mjs``), its per-launch patch
+# (``kirocrew_dsh_gate_<pid>.patch.yml``) and the mkstemp stages both are
+# renamed from (``kirocrew_dsh_gate_<pid>_*.tmp`` / ``kirocrew_dsh_patch_<pid>_*.tmp``).
+# Like the pi artifacts they are written once per gateway process and reused, so
+# the PID in the name is the owner's own and liveness, not age, decides staleness.
+_DSH_GATE_ARTIFACT_PREFIX = "kirocrew_dsh_gate_"
+_DSH_PATCH_ARTIFACT_PREFIX = "kirocrew_dsh_patch_"
+_DSH_GATE_ARTIFACT_SUFFIXES: tuple[str, ...] = (".mjs", ".patch.yml", ".tmp")
 _PI_GATE_DIR_ARTIFACTS: dict[str, tuple[str, ...]] = {
     _PI_GATE_ARTIFACT_PREFIX: _PI_GATE_ARTIFACT_SUFFIXES,
+    _DSH_GATE_ARTIFACT_PREFIX: _DSH_GATE_ARTIFACT_SUFFIXES,
+    _DSH_PATCH_ARTIFACT_PREFIX: (".tmp",),
 }
 
 # Bind-mount SOURCES staged by the namespace launcher (empty dirs/files bound
@@ -8121,9 +8132,9 @@ def cleanup_stale_sandbox_profiles(*, data_home: Path, legacy_dir: str | None = 
                     continue
                 filepath = os.path.join(artifact_dir, entry)
                 # Age check first — handles the spawner-PID design flaw. Not for the
-                # pi gate artifacts: those are written once per gateway process and
-                # REUSED by every later spawn of that process, so their age says
-                # nothing, and the PID in their name is the owner's own.
+                # gate artifacts (pi and dsh): those are written once per gateway
+                # process and REUSED by every later spawn of that process, so their
+                # age says nothing, and the PID in their name is the owner's own.
                 try:
                     if artifact_fd is None:
                         mtime = os.stat(filepath).st_mtime
@@ -11271,6 +11282,25 @@ def scrub_env(
     prefixes = _SPAWN_SCRUB_ENV_PREFIXES + (extra_prefixes or [])
     src = os.environ if env is None else env
     return {k: v for k, v in src.items() if not any(k.startswith(p) for p in prefixes)}
+
+
+def agent_env_scrub_prefixes() -> tuple[str, ...]:
+    """Name prefixes :func:`scrub_agent_subprocess_env` drops from an agent child.
+
+    DERIVED from the two lists that scrub actually composes, so a caller checking
+    "would this variable survive the scrub?" cannot drift from the scrub itself.
+    That question has one caller today: the ``agent.deepseek_env`` validator in
+    ``acp/client.py`` refuses to inject a name the scrub would strip, because the
+    injection happens BEFORE the scrub and the operator would otherwise get a
+    harness with no provider key and no error naming why.
+
+    Deliberately NOT the whole truth about a given spawn: ``forward_ssh_auth_sock``
+    re-admits ``SSH_AUTH_SOCK`` for an opted-in agent child, so a name matching
+    that prefix is reported as scrubbed here even though one spawn shape keeps it.
+    The caller's use is a refusal, so answering conservatively refuses a name that
+    might have worked rather than accepting one that silently would not.
+    """
+    return tuple(_SPAWN_SCRUB_ENV_PREFIXES) + tuple(_PYTHON_ENV_PREFIXES)
 
 
 def scrub_agent_denied_env(env: dict[str, str]) -> dict[str, str]:

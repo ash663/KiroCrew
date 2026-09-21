@@ -11,8 +11,8 @@ reviewing `session_pid.py::_BROWSER_PLAUSIBLE_OWNER_NAMES` as a separate
 touchpoint, because an unreadable environment on a recognizable harness process
 must keep its browser daemon alive.
 
-Kiro, Claude Code, KAS, Codex, OpenCode, Pi and goose are selectable on a plain
-public build. Claude Code in particular is a shipped harness and not a dormant seam: `acp/client.py` owns the
+Kiro, Claude Code, KAS, Codex, OpenCode, Pi, goose and DeepSeek are selectable on a
+plain public build. Claude Code in particular is a shipped harness and not a dormant seam: `acp/client.py` owns the
 whole Claude spawn path and the adapter is a public npm package, so an earlier
 revision that left it out of the baseline removed only the switch, never a
 capability. Whether the binaries are INSTALLED on a given machine is a different
@@ -24,20 +24,23 @@ core can spell is an id an operator can choose unless something states the
 exception — pinned by
 `test_agent_backend_editable.py::test_baseline_ships_every_known_backend`, which
 guards against an undocumented NARROWING rather than a widening.
-There is one exception today: `ACP_BACKEND_DEEPSEEK`. It passes the install-probe
-half of the bar and fails the routing half — its own sandbox decides its tool calls, so
-Crew's PreToolUse gate would not run for what a session actually does — and it is named
-in `NOT_SHIPPED_SELECTABLE` with that reason. Empty remains the state to return to, and
-the way back is the routing half rather than a relaxed assertion.
+There is no exception today: `NOT_SHIPPED_SELECTABLE` is empty, which is the state
+to return to. `ACP_BACKEND_DEEPSEEK` was the most recent member. It passed the
+install-probe half of the bar and failed the routing half — its own sandbox decided
+its tool calls, so Crew's PreToolUse gate would not run for what a session actually
+did — and it left the set the way the bar demands, through the routing half rather
+than a relaxed assertion: Crew composes its own gate plugin into the harness and
+reads the plugin's load marker back before the first prompt
+(`Routing.VERIFIED_GATE_EXTENSION`, `agent_sdk/backends.py`).
 
-`ACP_BACKEND_CODEX` is how that return looks: it was the previous member and left the
+`ACP_BACKEND_CODEX` is the earlier instance of that return: it left the
 set once both halves landed — `backend_install.py` gained its probe, so the install row
 names the missing component and its command instead of reading `unknown`, and
 `acp_tool_gate` established that its tool calls reach the PreToolUse gate.
 
-Read the invariants below against that tree: seven harnesses can serve a real
+Read the invariants below against that tree: eight harnesses can serve a real
 session today, so a site that spells "kiro" by exclusion is already wrong on
-six of them.
+seven of them.
 
 *Parity* here does not mean equal treatment. It means the opposite, stated
 precisely: **an added harness may only adapt itself to the seams the Kiro

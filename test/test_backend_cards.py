@@ -398,18 +398,18 @@ def test_the_only_where_it_lives_line_left_is_the_credential_store() -> None:
         assert name in cards_mod.OFF_CARD_SETS, name
 
 
-def test_the_ungatable_harness_is_named_as_not_offered_and_says_why() -> None:
-    """Known, not selectable, and the card carries the reason as data.
+def test_every_known_harness_is_offered_and_carries_its_routing() -> None:
+    """Known, selectable, and the card carries the routing as data.
 
-    deepseek is in ``ACP_BACKENDS_KNOWN`` so a governance rule can name it, and
-    outside the selectable baseline because nothing establishes that its tool
-    calls reach the host gate. Those are the two fields the panel needs to show a
-    row for it and say why it cannot be picked -- with no prose written per
-    harness anywhere.
+    deepseek was the one harness this test existed for: in ``ACP_BACKENDS_KNOWN`` so
+    a governance rule could name it, and outside the selectable baseline because
+    nothing established that its tool calls reach the host gate. Its gate plugin
+    closes the second half, so the row is now offered and its routing is what the
+    panel shows -- still with no prose written per harness anywhere.
     """
     card = cards_mod.card_for(ACP_BACKEND_DEEPSEEK)
-    assert card.offered_by_build is False
-    assert card.tool_approval == Routing.UNVERIFIED.value
+    assert card.offered_by_build is True
+    assert card.tool_approval == Routing.VERIFIED_GATE_EXTENSION.value
     assert ACP_BACKEND_DEEPSEEK in sdk_backends.ACP_BACKENDS_KNOWN
 
 

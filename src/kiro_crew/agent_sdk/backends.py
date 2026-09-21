@@ -471,16 +471,20 @@ ACP_BACKENDS_SESSION_MCP_ARRAY: FrozenSet[str] = frozenset(
 #:   creates or restores the session. The read-back is on the SAME connection as the
 #:   session -- no second child, and no window in which the session is live and the
 #:   mode is unconfirmed. See :data:`Routing.VERIFIED_SEEDED_SETTINGS`.
-#: ``ACP_BACKEND_DEEPSEEK`` is NOT included, and it fails the SECOND condition
-#: rather than the first: it has an install probe, and its tool calls are not routed.
-#: Its sandbox decides them itself -- an in-policy action runs silently, an
-#: out-of-policy one is denied with the denial in the tool result -- and
-#: ``session/request_permission`` carries only a model-initiated request to escalate
-#: past that sandbox. So Crew's PreToolUse gate, and with it the bundled
-#: denied-command rules, the sensitive-path block and the governance ceiling, would
-#: run for almost nothing a session actually does. Offering the switch would be
-#: offering a harness Crew cannot gate; ``test_agent_backend_editable`` names it in
-#: ``NOT_SHIPPED_SELECTABLE`` with that reason.
+#: * ``backend_install`` probes for the ``dsh`` binary, one component, because the
+#:   harness's own release ships the executable that serves ACP from its ``acp``
+#:   profile.
+#: * its tool calls are ROUTED and the routing is VERIFIED. Its sandbox decides an
+#:   action itself and its own ``session/request_permission`` carries only a
+#:   model-initiated escalation -- so
+#:   the gate is not a setting Crew can seed but a PLUGIN Crew composes, through the
+#:   per-launch patch its own launcher documents. The plugin answers the harness's
+#:   ``tools/pre-execute`` waterfall with ``ask``, which its tools core resolves
+#:   through ``ctx.approval`` and its ACP bridge answers by emitting
+#:   ``session/request_permission`` per call. The read-back is the gate's own load
+#:   marker, keyed to this session's nonce and to Crew's sealed file, read before the
+#:   first prompt. See :data:`Routing.VERIFIED_GATE_EXTENSION` and
+#:   :data:`Readback.LOAD_MARKER`.
 BASELINE_SELECTABLE_BACKENDS: FrozenSet[str] = frozenset(
     {
         ACP_BACKEND_KIRO,
@@ -490,6 +494,7 @@ BASELINE_SELECTABLE_BACKENDS: FrozenSet[str] = frozenset(
         ACP_BACKEND_OPENCODE,
         ACP_BACKEND_PI,
         ACP_BACKEND_GOOSE,
+        ACP_BACKEND_DEEPSEEK,
     }
 )
 
@@ -919,13 +924,15 @@ ACP_BACKENDS_MEMBER_CAPABILITIES = frozenset({ACP_BACKEND_KIRO})
 # pi is excluded on the evidence in ``ACP_BACKENDS_SESSION_MCP_ARRAY``: the array is
 # accepted and never forwarded to the agent, so a member dispatch mounted through it
 # would be inert.
-# deepseek is excluded, and it fails a HARDER test than pi above. It
-# does have the mount -- it is a member of ``ACP_BACKENDS_SESSION_MCP_ARRAY`` -- so
-# codex's first precondition holds. Codex's second does not: its routing is
-# ``Routing.UNVERIFIED``, outside ``tool_gate.ENFORCED_ROUTINGS``, so a session that
-# cannot be gated is never refused because nothing gates it. Mounting session control
-# into such a session would hand Crew's own control plane to a harness whose tool
-# calls Crew does not decide. A member session on it stays plain chat.
+# deepseek is excluded, and since Crew's gate plugin was composed into it the ground
+# is H6 alone. It has the mount -- it is a member of ``ACP_BACKENDS_SESSION_MCP_ARRAY``
+# -- and its routing (``Routing.VERIFIED_GATE_EXTENSION``, read back from the
+# plugin's load marker before the first prompt) sits inside
+# ``tool_gate.ENFORCED_ROUTINGS``, so both of codex's preconditions now hold where
+# the second once failed. What it lacks is the DECISION for THIS harness: H6 is
+# explicit that supporting one harness establishes nothing about another, and no
+# member-dispatch round trip has been driven on it. A member session on it stays
+# plain chat -- the dispatch tools are not mounted, never mounted-and-refused.
 #
 # WHERE the mount happens differs by backend, and opencode's is the client's.
 # ``AcpClient._append_member_dispatch_server`` serves the backends whose array the
@@ -2157,20 +2164,20 @@ ACP_BACKEND_ROUTING: dict = {
     ACP_BACKEND_OPENCODE: Routing.VERIFIED_SEEDED_SETTINGS,
     ACP_BACKEND_PI: Routing.VERIFIED_GATE_EXTENSION,
     ACP_BACKEND_GOOSE: Routing.VERIFIED_SEEDED_SETTINGS,
-    # deepseek is ``UNVERIFIED`` on OBSERVATION, not for want of looking, and the
-    # distinction matters because its approval setting looks like a seed-and-verify
-    # case and is not one. Its ACP surface does advertise
-    # ``session/request_permission``, and its composition does carry an approval
-    # service whose policy Crew can pin and read back. What the wire shows is that
-    # neither decides a tool call: the sandbox permits an in-policy action silently
-    # and DENIES an out-of-policy one with the denial in the tool result, and the
-    # permission request carries only a MODEL-INITIATED ask to escalate past that
-    # sandbox -- refused outright when the model omits its justification. Four live
-    # captures across the confined and read-only postures raised no permission
-    # request at all. So a ``VERIFIED_SEEDED_SETTINGS`` entry here would read back a
-    # setting that governs escalations and assert a routing guarantee nothing
-    # performs, which is the one thing this table exists to prevent.
-    ACP_BACKEND_DEEPSEEK: Routing.UNVERIFIED,
+    # deepseek reaches the same member as pi, and by the same reasoning: the harness
+    # has no gate of its own that decides a TOOL CALL, so Crew loads one into it.
+    # Its sandbox permits an in-policy
+    # action silently, DENIES an out-of-policy one with the denial in the tool
+    # result, and its own ``session/request_permission`` carries only a
+    # MODEL-INITIATED ask to escalate past that sandbox, so its approval POLICY is
+    # real, readable, and routes nothing. That is why it is not
+    # ``VERIFIED_SEEDED_SETTINGS``. What it does answer is its own
+    # ``tools/pre-execute`` waterfall: a plugin returning ``{kind: 'ask'}`` makes its
+    # tools core resolve the call through ``ctx.approval``, which its ACP bridge
+    # answers by emitting ``session/request_permission`` per call. So the gate is an
+    # extension Crew composes, which is this member, and the frame corpus carries the
+    # live capture (``test/fixtures/acp_frames/deepseek/permission-request-live``).
+    ACP_BACKEND_DEEPSEEK: Routing.VERIFIED_GATE_EXTENSION,
 }
 
 
@@ -2227,6 +2234,55 @@ ACP_BACKEND_PERMISSION_SETTING: dict = {
 #: is package data resolved by the driver, not by this leaf.
 ACP_BACKEND_GATE_PROBE_COMMAND: dict = {
     ACP_BACKEND_PI: "kiro-crew-gate",
+    # deepseek's token is a PLUGIN name rather than a command name, because its
+    # composition has no command registry to register into -- see
+    # ``ACP_BACKEND_GATE_READBACK`` below for which read-back looks for it.
+    ACP_BACKEND_DEEPSEEK: "kiro-crew-tool-gate",
+}
+
+
+class Readback(str, Enum):
+    """HOW a ``VERIFIED_GATE_EXTENSION`` harness is asked whether the gate loaded.
+
+    The mechanism is one member of :class:`Routing` because the GUARANTEE is one
+    thing -- Kiro Crew's own gate, loaded into a harness that has none, confirmed
+    present before the first prompt -- but the QUESTION has to be asked in the
+    harness's own terms, and two harnesses do not answer the same way. This enum
+    is that difference, kept as data beside the routing table so a third harness
+    is a row rather than a branch in the verdict.
+
+    ``COMMAND_REGISTRY`` -- ask the harness. The extension registers a command and
+    the harness's own registry reports it with the file it was loaded from, so the
+    WITNESS is the harness: Crew reads back an answer it did not author. This is
+    the stronger of the two and is preferred wherever a harness offers it.
+
+    ``LOAD_MARKER`` -- ask Crew's own code, because the harness offers nothing to
+    ask. The plugin writes one file at a path Crew names in the child's
+    environment, carrying the probe name, the per-session nonce Crew issued, and
+    its own resolved module URL. Present-with-this-nonce-and-this-module proves
+    the plugin Crew shipped was composed, from Crew's file, in THIS session --
+    which is the precondition. It is weaker than the member above in one specific
+    way, stated rather than glossed: the witness is the gate itself, so it
+    attests that Crew's code ran and not that the harness reports it running. A
+    harness whose ACP surface adds no method, capability or ``_meta`` field -- which
+    is the dsh ACP profile's own declared invariant -- leaves no third option, and
+    a marker that is merely ABSENT refuses the session, so the failure direction
+    is closed either way.
+    """
+
+    COMMAND_REGISTRY = "command_registry"
+    LOAD_MARKER = "load_marker"
+
+
+#: Harness id -> how its ``VERIFIED_GATE_EXTENSION`` read-back is performed.
+#:
+#: A ``.get(backend, Readback.COMMAND_REGISTRY)`` read would be wrong here: a
+#: harness added to the routing table without a row would silently inherit a
+#: read-back its driver never implements and report ROUTED for it. So the lookup
+#: fails closed instead -- see :func:`gate_readback_for`.
+ACP_BACKEND_GATE_READBACK: dict = {
+    ACP_BACKEND_PI: Readback.COMMAND_REGISTRY,
+    ACP_BACKEND_DEEPSEEK: Readback.LOAD_MARKER,
 }
 
 
@@ -2442,3 +2498,14 @@ def permission_setting_for(backend: str) -> tuple:
 def gate_probe_command_for(backend: str) -> str:
     """The probe command *backend*'s gate extension registers, or ``""`` when none."""
     return ACP_BACKEND_GATE_PROBE_COMMAND.get(backend, "")
+
+
+def gate_readback_for(backend: str) -> Readback | None:
+    """How *backend*'s gate-extension read-back is performed, or ``None``.
+
+    ``None`` means this harness declares no read-back style, and every caller
+    treats that as a refusal rather than picking one: a harness routed through
+    :data:`Routing.VERIFIED_GATE_EXTENSION` whose style is unknown would otherwise
+    report ROUTED for a check its driver never runs.
+    """
+    return ACP_BACKEND_GATE_READBACK.get(backend)
