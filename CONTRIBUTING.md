@@ -184,128 +184,14 @@ KIROCREW_HOME=.kirocrew-dev KIROCREW_PORT=6777 kirocrew token
 
 ## Releasing New Versions
 
-### The model
+The release-branch, candidate, stable, hot-patch, version-stamping, artifact,
+and recovery procedures are maintained in the
+[release runbook](docs/build/release.md). Follow that runbook rather than copying
+commands from this guide; these details are coupled to the current workflows.
 
-`main` is always the latest code, and deliberately not stable. Feature releases
-are cut as a **release branch** off `main` on 0.1 increments (`0.1.0` → `0.2.0`
-→ `0.3.0`).
-
-Once a branch is cut, **bug fixes for that release go on the release branch, not
-on `main`.** Each one produces a new release candidate — `0.2.0-rc.1`,
-`-rc.2`, … — published to the insider channel. **Stable is BUILT FRESH from the commit the last RC cleared, under the bare
-`X.Y.Z`.** A stable release must never ship a version carrying a prerelease
-suffix, and the RC's bytes are stamped from its prerelease tag, so nothing
-downstream can re-stamp them without invalidating the recorded digests and the
-macOS signatures.
-
-Byte-for-byte reuse of the candidate's artifacts survives as an opt-in escape
-hatch for when stable must run the identical binary insiders validated: set
-`vars.STABLE_PROMOTE_BYTES` to that exact base version. Its cost is precisely
-the RC-stamped embedded version those bytes carry. The full model, including
-what the promotion record must prove, is in
-[docs/build/release.md](docs/build/release.md).
-
-Hot patches bump the patch digit (`0.2.0` → `0.2.1`) from the release branch and
-must also have a successful prerelease candidate before the bare stable tag.
-
-After each stable cut, do two things: **bump `main` by 0.1** (to `0.3.0`) so
-nightlies sort above what just shipped, and **merge the branch's fixes back into
-`main`** so they aren't stranded on the branch.
-
-### Channels
-
-The channel table lives in [Release channels](README.md#release-channels); the
-trigger-and-version-shape facts behind it are in
-[docs/build/release.md](docs/build/release.md). What a contributor needs on top
-of those: nightly installs **side by side** as its own app, while insider and
-stable are two update lanes of **one** production app, switchable in Settings.
-
-### Cutting a release
-
-```bash
-# 1. Branch off main
-git switch -c release/0.2.0 origin/main
-git push -u origin release/0.2.0
-
-# 2. Tag RCs on the branch as fixes land → each publishes to insider
-git tag -a v0.2.0-rc.1 -m "0.2.0 rc1" && git push origin v0.2.0-rc.1
-#    ... fixes land on release/0.2.0 ... then v0.2.0-rc.2, -rc.3, …
-
-# 3. Promote: tag the good RC's EXACT COMMIT with a bare version → stable.
-#    release.yml resolves that successful RC run's immutable promotion bundle;
-#    it does not invoke either build workflow on the bare tag.
-git tag -a v0.2.0 -m "release 0.2.0" <rc-commit-sha>
-git push origin v0.2.0
-
-# 4. Bump main to 0.3.0 (PR), and merge the branch's fixes back into main
-
-# Hot patch: fix on the release branch, cut/test v0.2.1-rc.1 first, then
-# put bare v0.2.1 on that candidate's exact commit and push it.
-```
-
-Update `CHANGELOG.md` with a `## [X.Y.Z] - YYYY-MM-DD` section as part of the
-release (see [docs/build/changelog.md](docs/build/changelog.md) for the format), and land the
-changelog and any version bump through a normal PR — never push to `main` or a
-release branch directly.
-
-### How builds are triggered
-
-**Nightly** runs on a schedule every night and can be kicked off on demand at any
-time. **Insider and stable are triggered by pushing a version tag** — an RC tag
-builds and publishes to insider, and a plain version tag builds stable from the
-cleared commit (or republishes the candidate's bytes when
-`vars.STABLE_PROMOTE_BYTES` names that base).
-
-The release branch, the RC numbering, the promote decision, and the back-merge
-are all **human process**. The pipeline reacts to the tag, but the stable path
-also requires the successful same-commit prerelease record and fails closed if
-it cannot prove that record's immutable digest.
-
-A nightly or prerelease build produces a signed and notarized macOS app, a Linux
-AppImage, a pip wheel, and a Docker image. Stable rebuilds them from the cleared
-commit unless `vars.STABLE_PROMOTE_BYTES` names that base, in which case the
-candidate's exact bytes are republished. A channel's update feed is repointed
-**last**, after its
-artifacts are verified downloadable, and clients only install with the user's
-consent. Windows builds but is not yet signed or published.
-
-**There is no rollback — we roll forward by cutting a new version.** Published
-CDN keys are immutable and are never overwritten.
-
-### Bumping the in-code version
-
-The in-code version governs **non-tag** builds — nightly and local/source
-installs. A tagged release overrides all three manifests at build time, so this
-is what makes nightlies read as previews of the *next* release:
-
-| File | Field |
-|------|-------|
-| `src/kiro_crew/__init__.py` | `__version__` — the source of truth |
-| `pyproject.toml` | `[project] version` — what the wheel carries |
-| `website/electron/package.json` | `version` — the updater's version compare |
-
-Keep it a bare `X.Y.Z` **on `main`**: `nightly.yml` builds both a semver and a
-PEP 440 stamp from it, and a suffixed base (`.dev0`) produces invalid versions.
-
-On an **insider release branch** the in-code version instead carries the RC, so
-a source/dev checkout reads as the candidate it is. All three files use the
-**same dual-valid spelling** `X.Y.Z-rc.N` (e.g. `0.4.0-rc.4`): it is valid
-SemVer for `package.json` **and** valid (non-canonical) PEP 440, which pip and
-setuptools normalize to `X.Y.ZrcN`. Do not use the canonical PEP 440 spelling
-(`0.4.0rc4`) in `__init__.py` — `packaging/build-desktop.sh` greps `__version__`
-straight into electron-builder's `extraMetadata.version`, which rejects
-non-SemVer and kills a local `make desktop`. The tag still overrides all three
-at build time (see `docs/build/release.md` → "Version stamping").
-
-### One trap worth knowing
-
-Any two prerelease tags sharing a base and a trailing number collapse onto the
-same PEP 440 wheel version — `v0.2.0-rc.1` and `v0.2.0-insider.1` both map to
-`0.2.0rc1`. The second publish then fails as a republish of an immutable key, so
-**stick to one prerelease convention (`-rc.N`) per base version.**
-
-Full detail, including the branch, channel, and RC model behind these steps and the
-platform-lane contract: **[docs/build/release.md](docs/build/release.md)**.
+Release changes land through normal pull requests—never push directly to
+`main` or a release branch. The release PR updates `CHANGELOG.md` according to
+the [changelog format](docs/build/changelog.md).
 
 ## Project Structure
 
