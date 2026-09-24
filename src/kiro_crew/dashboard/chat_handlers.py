@@ -96,6 +96,7 @@ from kiro_crew.dashboard.chat_title import _maybe_auto_title
 from kiro_crew.dashboard.chat_utils import (
     _MANUAL_CONTINUE_MSG,
     _MANUAL_RESUME_MSG,
+    SLOT_DETAIL_MAX_LIMIT,
     SYNTHETIC_RECOVERY_KIND,
     _broadcast_expired_oauth_banners,
     _build_stream_chunk,
@@ -2307,7 +2308,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
 
     Query params:
       - ``limit``: max messages to return (optional; if omitted, returns ALL messages from disk).
-        Clamped to 1..500. A value below 1 is rejected rather than clamped up, because
+        Clamped to 1..SLOT_DETAIL_MAX_LIMIT (500). A value below 1 is rejected rather than clamped up, because
         no caller asking for 0 wanted exactly one message.
       - ``before``: return messages before this index (legacy pagination, still supported).
         ``before=0`` is valid and yields an empty page.
@@ -2335,7 +2336,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     # plainly a bad request. The branch below still keys off the RAW values, so
     # routing is unchanged.
     try:
-        limit = min(int(limit_raw or "200"), 500)
+        limit = min(int(limit_raw or "200"), SLOT_DETAIL_MAX_LIMIT)
         before = int(before_raw) if before_raw is not None else None
     except ValueError:
         return web.json_response(
@@ -2601,6 +2602,15 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
         #
         # `done` is already excluded upstream (`_UNOWED_WINDOW_ROLES`), so on
         # this path the reduction's remaining job is folding the chunk runs.
+        #
+        # CLIENT DEPENDENCY on this collapse shape: while a slot streams, the
+        # in-flight chunk run folds into ONE trailing row that carries no durable
+        # `meta.mid`, and the bounded window ends in it. The dashboard's
+        # `warmSlotCache` (website/src/store/chatSlice.ts) sizes its count-matched
+        # request to the durable rows a pane holds and asks for ONE EXTRA row on a
+        # running slot so the folded row does not displace a durable one out of
+        # the window. A change here that folds the run into more than one row, or
+        # stops folding, moves that `+1` out of step with the response.
         all_msgs = await asyncio.to_thread(_collapse_wire_rows, all_msgs)
         total = len(all_msgs)
         if before is not None:
