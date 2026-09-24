@@ -891,11 +891,9 @@ class TestProjectNamesDenialAttribution:
 # Forwarding helpers are pinned as forwarding rather than forced to use a fixed
 # literal that would erase the caller's attribution.
 _EXPECTED_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
-    # Two reads under one label: the launch loop reads each authored spec to
-    # project it, and stale-alias validation re-reads the recorded source to
-    # confirm it still names the same agent before reclaiming the view.
+    # One read: the launch loop reads each authored spec to project it. Alias
+    # reclaim is keyed on lease liveness and reads no authored source.
     "kiro_crew/acp/skill_projection.py": [
-        ("native_skill_projection", "acp"),
         ("native_skill_projection", "acp"),
     ],
     # Two reads, deliberately labelled apart: the session-MCP translation resolves

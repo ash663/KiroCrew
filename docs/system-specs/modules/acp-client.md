@@ -68,9 +68,13 @@ overlay markers and preserves unrelated settings and a native key that the
 operator changed or removed. Older overlays use their recorded local/global
 source and boolean preference for restoration. Stop projected sessions before
 rollback so another active Crew process cannot reassert the shared overlay.
-Inactive aliases owned by the same Crew data home are pruned only when the
-recorded work directory or authored source proves that the pair cannot be
-regenerated. Aliases published by builds that predate this lifecycle carry NO
+Inactive aliases owned by the same Crew data home are pruned when no projection
+in this process holds them and no held lease in any process names them. The
+recorded work directory is provenance, not a liveness proof: a per-run work
+directory (`workspace_root()/subagent_<id>`, `cron_<id>`) outlives its run, so a
+reclaim keyed on its existence keeps one alias per agent for every run ever
+spawned. Each run caps reclaims at `_PRUNE_MAX_RECLAIMS_PER_RUN` plus the number
+of aliases it publishes. Aliases published by builds that predate this lifecycle carry NO
 record of either kind, so an ownership-keyed reclaim alone would leave the entire
 accumulated backlog on disk and bound only post-upgrade growth -- which is the
 per-turn tool-spec cost this exists to remove. Those are reclaimed on a separate
@@ -114,10 +118,9 @@ schema; lifecycle ownership lives in the non-spec
 exact byte digest, so a stale or replaced sidecar cannot authorize deletion of a
 different spec. No released build ever wrote lifecycle fields INTO a spec --
 kiro-cli denies unknown fields, so the projection never could -- and an alias
-without a sidecar is judged by the unrecorded path above instead. On Windows, untrusted metadata paths must resolve to a classified
-local volume with no linked ancestor or linked leaf before any existence probe;
-remote, unclassifiable, or linked paths retain the alias without triggering a
-network lookup. Each live projection publishes one bounded lease in the non-spec
+without a sidecar is judged by the unrecorded path above instead. The recorded
+work directory and source paths are never probed, so untrusted metadata cannot
+trigger a filesystem or network lookup. Each live projection publishes one bounded lease in the non-spec
 `.kirocrew-skill-projection-leases` directory as TWO files: a `.json` record
 naming its aliases, which is never locked, and a `.hold` sidecar that carries the
 lock for the projection object's lifetime and is never read. The split is
@@ -138,12 +141,12 @@ Alias publication and pruning share one cross-process lock sidecar in the native
 agents directory, with a two-second acquisition ceiling instead of the platform
 lock's general five-minute ceiling. A sidecar that is a symlink or junction,
 changes identity while opened or acquired, or is otherwise unverifiable is
-treated as lock failure. Removal revalidates the candidate's identity, bytes,
-digest-bound ownership sidecar, and source staleness under that lock immediately before
+treated as lock failure. Removal revalidates the candidate's identity, bytes and
+digest-bound ownership sidecar under that lock immediately before
 unlinking it. POSIX uses descriptor-relative identity-checked deletion; Windows
 uses the same global publisher lock plus a final no-link identity check before
 its by-name unlink. An unknown platform without either contract retains the
-stale alias. A changed, unreadable, oversized, or otherwise uncertain candidate
+unused alias. A changed, unreadable, oversized, or otherwise uncertain candidate
 remains on disk. If the lock cannot be opened or acquired, preparation retains
 every alias and the current settings file byte-for-byte, then falls back to the
 authored native agent rather than risking a stale-snapshot overwrite or blocking

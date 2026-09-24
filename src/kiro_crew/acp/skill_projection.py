@@ -65,6 +65,9 @@ _LEGACY_ALIAS_NAME_RE = re.compile(re.escape(NATIVE_SKILL_ALIAS_PREFIX) + r"[0-9
 # spawn in a worktree-per-task pipeline fail to acquire and fall back to authored
 # agents. The backlog is bounded and shrinking, so spreading it over successive
 # spawns reclaims it just as completely without ever holding the lock long.
+# This is the headroom the per-run cap keeps over the aliases one run publishes,
+# so an accumulated backlog drains by at least this many per spawn while the
+# steady-state orphan rate is covered (see _prune_stale_managed_aliases).
 _PRUNE_MAX_RECLAIMS_PER_RUN = 64
 # The ONE window the re-preparation contract does not cover, and the only thing
 # this age excludes. A publisher from a build that predates the lease holds no
@@ -456,64 +459,6 @@ def _managed_marker(spec: object) -> bool:
     return isinstance(spec, dict) and spec.get(_MANAGED_MARKER) == _MANAGED_MARKER_VALUE
 
 
-def _managed_metadata_path_is_safe(path: Path) -> bool:
-    """Return whether untrusted managed metadata is safe to probe on this host."""
-    if not platform_compat.IS_WINDOWS:
-        return True
-    try:
-        # Ask only about the volume root first. Unlike is_dir/is_file, this does
-        # not resolve the attacker-controlled path or initiate SMB authentication.
-        if platform_compat.path_volume_is_remote(path) is not False:
-            return False
-        return platform_compat.first_linked_ancestor(
-            path
-        ) is None and not platform_compat.is_link_or_junction(path)
-    except (OSError, ValueError):
-        return False
-
-
-def _managed_alias_is_stale(spec: dict[str, Any]) -> bool:
-    """Return whether a managed view's authored source cannot regenerate it."""
-    work_dir_raw = spec.get(_MANAGED_WORK_DIR)
-    agent = spec.get(_MANAGED_AGENT)
-    source_raw = spec.get(_MANAGED_SOURCE)
-    if (
-        not isinstance(work_dir_raw, str)
-        or not work_dir_raw
-        or not isinstance(agent, str)
-        or not agent
-        or not isinstance(source_raw, str)
-        or not source_raw
-    ):
-        return False
-    try:
-        work_dir = Path(work_dir_raw)
-        if not _managed_metadata_path_is_safe(work_dir):
-            return False
-        if not work_dir.is_dir():
-            return True
-        source = Path(source_raw)
-        expected_parents = {
-            project_agents_dir(str(work_dir)).absolute(),
-            kiro_agents_dir().absolute(),
-        }
-        if source.absolute().parent not in expected_parents or source.suffix not in {
-            ".json",
-            ".md",
-        }:
-            return False
-        if not _managed_metadata_path_is_safe(source):
-            return False
-        if not source.is_file():
-            return True
-        authored = _read_agent_spec(source, operation="native_skill_projection", source="acp")
-    except (OSError, ValueError):
-        return False
-    # Read/parse uncertainty is fail-safe. A valid source naming a different
-    # agent proves this recorded pair cannot be regenerated.
-    return isinstance(authored, dict) and authored.get("name") != agent
-
-
 def _unlink_alias_if_unchanged(path: Path, identity: tuple[int, int]) -> bool:
     """Unlink *path* only while it still names the classified alias inode.
 
@@ -652,21 +597,34 @@ def _managed_metadata_for_alias(
 
 
 def _prune_stale_managed_aliases(directory: Path, crew_home_id: str, *, keep: set[str]) -> None:
-    """Remove stale aliases owned by this Kiro Crew data home while its lock is held."""
+    """Remove aliases owned by this Kiro Crew data home that no projection uses.
+
+    Runs while the publication lock is held. An alias is kept when this run
+    publishes it, a projection in this process holds it, or a held lease in any
+    process names it. Everything else this data home recorded is a cache entry
+    for a projection that has ended: every consumer re-prepares before it sends
+    an alias, so removing one costs the next spawn for that work directory one
+    rewrite and nothing else. Whether the recorded work directory still exists
+    is not consulted: a per-run work directory outlives its run, so keying on
+    it keeps one alias per agent for every run ever spawned.
+    """
     try:
         candidates = list(directory.glob(f"{NATIVE_SKILL_ALIAS_PREFIX}*.json"))
     except OSError:
         logger.debug("skill projection: cannot list %s to prune aliases", directory, exc_info=True)
         return
     active = _active_aliases()
+    # Each run publishes len(keep) aliases and leaves that many behind when it
+    # ends, so the cap covers that steady-state rate plus bounded backlog drain.
+    cap = _PRUNE_MAX_RECLAIMS_PER_RUN + len(keep)
     reclaimed = 0
     for path in candidates:
-        if reclaimed >= _PRUNE_MAX_RECLAIMS_PER_RUN:
+        if reclaimed >= cap:
             logger.info(
                 "skill projection: reclaim cap reached (%d); the rest drains on later spawns",
-                _PRUNE_MAX_RECLAIMS_PER_RUN,
+                cap,
             )
-            return
+            break
         if (
             path.stem in keep
             or path.stem in active
@@ -710,15 +668,13 @@ def _prune_stale_managed_aliases(directory: Path, crew_home_id: str, *, keep: se
                     # between the two reads; that owner decides its lifetime.
                     continue
                 if _unlink_alias_if_unchanged(path, identity):
-                    logger.info("skill projection: pruned unrecorded legacy alias %s", path.name)
+                    logger.debug("skill projection: pruned unrecorded legacy alias %s", path.name)
                     reclaimed += 1
                 else:
                     logger.debug("skill projection: legacy alias changed before removal: %s", path)
             continue
         metadata, metadata_path, metadata_identity, metadata_raw = managed
         if metadata.get(_MANAGED_CREW_HOME) != crew_home_id:
-            continue
-        if not _managed_alias_is_stale(metadata):
             continue
 
         # Re-open and revalidate the exact alias and ownership sidecar at
@@ -745,16 +701,17 @@ def _prune_stale_managed_aliases(directory: Path, crew_home_id: str, *, keep: se
             or current_metadata_identity != metadata_identity
             or current_metadata_raw != metadata_raw
             or current_metadata.get(_MANAGED_CREW_HOME) != crew_home_id
-            or not _managed_alias_is_stale(current_metadata)
         ):
             continue
         if _unlink_alias_if_unchanged(path, identity):
             if metadata_path is not None and metadata_identity is not None:
                 _unlink_projection_lease_if_unchanged(metadata_path, metadata_identity)
-            logger.info("skill projection: pruned stale managed alias %s", path.name)
+            logger.debug("skill projection: pruned unused managed alias %s", path.name)
             reclaimed += 1
         else:
-            logger.debug("skill projection: stale alias changed before removal: %s", path)
+            logger.debug("skill projection: unused alias changed before removal: %s", path)
+    if reclaimed > 0:
+        logger.info("skill projection: reclaimed %d unused alias(es)", reclaimed)
 
 
 def prepare_native_skill_projection(
