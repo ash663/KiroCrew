@@ -725,7 +725,7 @@ def _legacy_alias(agents, digest="0" * 24, name=None, resources=None, age_secs=3
     return path
 
 
-def test_prune_spares_a_legacy_alias_that_may_be_mid_publish(native_tree):
+def test_prune_spares_a_legacy_alias_that_may_be_mid_publish(native_tree, monkeypatch):
     """The one window the re-preparation contract does not cover.
 
     A publisher from a build predating the lease holds no lease, so between its
@@ -738,6 +738,8 @@ def test_prune_spares_a_legacy_alias_that_may_be_mid_publish(native_tree):
     (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
     fresh = _legacy_alias(agents, "f" * 24, age_secs=0)
     stale = _legacy_alias(agents, "e" * 24)
+    # Both candidates must be classified, so the walk must not end on the clock.
+    _hold_the_prune_clock(monkeypatch)
 
     assert projection.prepare_native_skill_projection(project) is not None
 
@@ -765,7 +767,7 @@ def test_prune_reclaims_the_backlog_left_by_builds_that_wrote_no_ownership(nativ
     assert _alias_file(agents, prepared).exists(), "this run's own alias was reclaimed"
 
 
-def test_prune_leaves_an_unattributable_alias_even_with_the_right_name(native_tree):
+def test_prune_leaves_an_unattributable_alias_even_with_the_right_name(native_tree, monkeypatch):
     """Shape is not provenance, and an unlink is not undoable.
 
     An operator's own agent could in principle carry this name, so one positive
@@ -778,6 +780,8 @@ def test_prune_leaves_an_unattributable_alias_even_with_the_right_name(native_tr
     (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
     unattributable = _legacy_alias(agents, "9" * 24, owned=False)
     attributable = _legacy_alias(agents, "8" * 24)
+    # Both candidates must be classified, so the walk must not end on the clock.
+    _hold_the_prune_clock(monkeypatch)
 
     assert projection.prepare_native_skill_projection(project) is not None
 
@@ -831,6 +835,8 @@ def test_prune_caps_reclaims_per_run_so_the_backlog_drains_over_spawns(native_tr
     (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
     monkeypatch.setattr(projection, "_PROJECTION_PRUNE_WORK_LIMIT", 4, raising=False)
     monkeypatch.setattr(projection, "_PRUNE_MAX_RECLAIMS_PER_RUN", 3)
+    # The survivor counts below assume each walk ends on the cap, not the clock.
+    _hold_the_prune_clock(monkeypatch)
     backlog = [_legacy_alias(agents, f"{n:024x}") for n in range(8)]
 
     assert projection.prepare_native_skill_projection(project) is not None
@@ -1849,6 +1855,8 @@ def test_prune_work_cap_counts_retained_candidates_before_reclaims(native_tree, 
 
     monkeypatch.setattr(projection, "_PROJECTION_PRUNE_WORK_LIMIT", 3, raising=False)
     monkeypatch.setattr(projection, "_PRUNE_MAX_RECLAIMS_PER_RUN", 64)
+    # Every stale candidate must be reached, so the walk must not end on the clock.
+    _hold_the_prune_clock(monkeypatch)
 
     scans = 0
 
@@ -2170,6 +2178,8 @@ def test_boot_drain_retries_a_batch_that_missed_the_lock(native_tree, monkeypatc
     monkeypatch.setattr(projection, "_projection_alias_lock", flaky)
     monkeypatch.setattr(projection, "_PRUNE_MAX_RECLAIMS_PER_RUN", 2)
     monkeypatch.setattr(projection, "_DRAIN_BATCH_PAUSE_SECS", 0)
+    # The exact batch sequence below assumes each walk ends on the cap, not the clock.
+    _hold_the_prune_clock(monkeypatch)
 
     assert projection.drain_stale_aliases() == 5
     assert not any(alias.exists() or meta.exists() for alias, meta in backlog)
@@ -2560,6 +2570,8 @@ def test_prune_does_not_let_the_run_keep_alias_starve_backlog_reclamation(native
     (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
     monkeypatch.setattr(projection, "_PROJECTION_PRUNE_WORK_LIMIT", 4, raising=False)
     monkeypatch.setattr(projection, "_PRUNE_MAX_RECLAIMS_PER_RUN", 3)
+    # The exact reclaim count below assumes the walk ends on the cap, not the clock.
+    _hold_the_prune_clock(monkeypatch)
     backlog = [_legacy_alias(agents, f"{index:024x}") for index in range(8)]
 
     # The run's own alias is named by its view digest, so it is identified at
