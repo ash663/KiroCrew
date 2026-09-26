@@ -215,6 +215,42 @@ Behaviour hangs off `resources` and `lifecycle`, never off `origin`:
 | Update | re-clone or re-copy, re-register | 400 | 400 |
 | Uninstall | teardown then remove files | teardown then remove files | 400 (disable instead) |
 
+Update has two front doors and one handler. The dashboard's **Sync** button and
+`kirocrew app update <name> [--source PATH]` both land on
+`POST /api/apps/{name}/update` (`routes.handle_update_app`), the CLI through the
+owner-only socket the way `enable`/`disable`/`uninstall` reach the gateway
+(`app_lifecycle_client.toggle_app`). Nothing but the running gateway may do the
+swap: `manager.update_app` alone replaces the files while the process that owns
+the old manifest's MCP servers, agents and backend keeps serving them, so the
+CLI verb has **no file-only fallback** — with no gateway reachable it exits 3 and
+changes nothing, where `enable`/`disable` fall back to editing `installed.json`.
+The verb's only transport is that socket, so without `AF_UNIX` (Windows, and
+sandboxed shells that cannot reach the socket) it is unavailable outright: it
+exits 3 saying so and naming the dashboard's Sync, rather than "start the
+gateway", which on such a host could never make it succeed.
+The handler's refusals carry a `code` the CLI's exit codes are switched on
+(`app_not_installed` 404, `app_lifecycle_not_gateway` 400 — both exit 5 — and
+`app_source_name_mismatch` 400, exit 4; the prose beside each is advisory, and
+exit 2 is left to argparse's own usage error), and
+a success carries `previousVersion` / `version` beside the `registration`
+counts, read from the installed record after the swap rather than parsed back
+out of the `updated <name> v1 -> v2` message. The mismatch is established
+**before the teardown**: the handler reads the source manifest's `name` inside
+the lifecycle lock but before it stops the backend or deregisters anything, so a
+`--source` pointing at another app's tree is refused with the running app
+untouched, where `update_app`'s own `expected_name` guard — kept as the
+authoritative check under the lock — would only have fired after the stop and
+deregister and forced a rollback. A source whose manifest is missing or
+unreadable is not a mismatch and is left to `update_app` to refuse in its own
+words. `--source` is resolved to an
+absolute path in the CLI's own process, because the gateway would otherwise
+resolve a relative one against ITS cwd. There is deliberately no flag naming a
+registry entry: the handler treats a `registry:<name>` source as both the entry
+to clone and the app to install, so the only legitimate value is the app's own
+name — which the bare verb already sends, since that is the `source` a registry
+install records — and any other value would clone a second app under the first
+one's lifecycle lock.
+
 An unknown value in any of the three is repaired to that field's default with a
 warning rather than raising: `installed.json` is read on every boot, and a
 metadata typo must not make an app unloadable. A record written before the fields

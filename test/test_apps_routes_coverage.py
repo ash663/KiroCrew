@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import platform as platform_mod
 import threading
 from pathlib import Path
@@ -1169,6 +1170,8 @@ class TestUpdateApp:
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.post("/api/apps/ghost/update")
             assert resp.status == 404
+            # ``kirocrew app update`` exits 5 on this code, never on the prose.
+            assert (await resp.json())["code"] == "app_not_installed"
 
     @pytest.mark.asyncio
     async def test_self_managed_lifecycle_is_refused(
@@ -1181,7 +1184,9 @@ class TestUpdateApp:
         async with TestClient(TestServer(_make_app())) as client:
             resp = await client.post("/api/apps/ext-app/update")
             assert resp.status == 400
-            assert "lifecycle='app'" in (await resp.json())["error"]
+            body = await resp.json()
+            assert "lifecycle='app'" in body["error"]
+            assert body["code"] == "app_lifecycle_not_gateway"
 
     @pytest.mark.asyncio
     async def test_missing_source_is_400(
@@ -1402,6 +1407,183 @@ class TestUpdateApp:
             data = await resp.json()
         assert data["ok"] is True
         assert "registration" in data
+
+    @pytest.mark.asyncio
+    async def test_local_update_reports_the_version_transition_and_keeps_data(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The response names old -> new as fields, and ``data/`` survives the swap.
+
+        ``kirocrew app update`` prints ``previousVersion`` / ``version`` rather than
+        parsing them back out of the prose ``message``; both must be the installed
+        record's values, not the request's.
+        """
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path)
+        enable_app(APP)
+        from kiro_crew.apps.manager import app_data_dir, get_app
+
+        (app_data_dir(APP) / "notes.txt").write_text("keep me", encoding="utf-8")
+        newer = _make_app_source(tmp_path / "newer", version="1.1.0")
+        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n: None)
+        monkeypatch.setattr(routes_mod, "start_app_backend", lambda n: None)
+
+        async with TestClient(TestServer(_make_app())) as client:
+            resp = await client.post(f"/api/apps/{APP}/update", json={"source": str(newer)})
+            assert resp.status == 200
+            data = await resp.json()
+        assert data["ok"] is True
+        assert data["previousVersion"] == "1.0.0"
+        assert data["version"] == "1.1.0"
+        assert "registration" in data
+        installed = get_app(APP)
+        assert installed is not None and installed["version"] == "1.1.0"
+        assert (app_data_dir(APP) / "notes.txt").read_text(encoding="utf-8") == "keep me"
+
+    @pytest.mark.asyncio
+    async def test_source_naming_another_app_is_refused_with_a_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``--source`` pointing at some other app's tree must not touch this one.
+
+        The refusal carries ``app_source_name_mismatch`` (the CLI's exit 4), the
+        installed version is untouched, and -- because the manifest's name is read
+        BEFORE the teardown -- the backend was never stopped and nothing was
+        deregistered for a request that was never going to be applied. Before the
+        preflight the same request took the app down, hit ``update_app``'s
+        ``expected_name`` guard, and rolled back.
+        """
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path)
+        enable_app(APP)
+        from kiro_crew.apps.manager import get_app
+
+        other = _make_app_source(tmp_path, name="some-other-app", version="9.9.9")
+        touched: list[str] = []
+        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n: touched.append("stop"))
+        monkeypatch.setattr(routes_mod, "start_app_backend", lambda n: touched.append("start"))
+
+        async def _must_not_deregister(name: str) -> Any:
+            touched.append("deregister")
+            return SimpleNamespace(to_dict=dict)
+
+        monkeypatch.setattr(routes_mod, "_deregister_app_off_loop", _must_not_deregister)
+
+        # The manifest read is a blocking file read of a caller-supplied path (it
+        # may be a FIFO), so the handler must run it off the loop thread.
+        real_preflight = routes_mod._source_manifest_names_another_app
+        preflight_threads: list[str] = []
+
+        def _recording_preflight(app_name: str, source: str) -> str | None:
+            preflight_threads.append(threading.current_thread().name)
+            return real_preflight(app_name, source)
+
+        monkeypatch.setattr(
+            routes_mod, "_source_manifest_names_another_app", _recording_preflight
+        )
+
+        async with TestClient(TestServer(_make_app())) as client:
+            resp = await client.post(f"/api/apps/{APP}/update", json={"source": str(other)})
+            assert resp.status == 400
+            body = await resp.json()
+        assert body["ok"] is False
+        assert body["code"] == "app_source_name_mismatch"
+        assert "does not match" in body["error"]
+        installed = get_app(APP)
+        assert installed is not None and installed["version"] == "1.0.0"
+        # Refused before the teardown: no stop, no deregister, and so no rollback.
+        assert touched == []
+        assert preflight_threads and all(
+            t != threading.main_thread().name for t in preflight_threads
+        ), preflight_threads
+
+    def test_identity_preflight_reports_only_a_confirmed_mismatch(self, tmp_path: Path) -> None:
+        """An unreadable source is ``update_app``'s to refuse, not the preflight's.
+
+        The preflight answers one question -- does this manifest name another app --
+        so a missing, malformed, non-object or nameless ``app.json`` and a path that
+        is not a directory all come back ``None`` (never a traceback), leaving
+        ``update_app`` to refuse them in its own words as before.
+        """
+        other = _make_app_source(tmp_path, name="some-other-app")
+        assert routes_mod._source_manifest_names_another_app(APP, str(other)) == "some-other-app"
+        same = _make_app_source(tmp_path / "same", name=APP)
+        assert routes_mod._source_manifest_names_another_app(APP, str(same)) is None
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert routes_mod._source_manifest_names_another_app(APP, str(empty)) is None
+        assert routes_mod._source_manifest_names_another_app(APP, str(tmp_path / "nope")) is None
+        (empty / APP_MANIFEST_FILENAME).write_text("{not json", encoding="utf-8")
+        assert routes_mod._source_manifest_names_another_app(APP, str(empty)) is None
+        (empty / APP_MANIFEST_FILENAME).write_text("[1, 2]", encoding="utf-8")
+        assert routes_mod._source_manifest_names_another_app(APP, str(empty)) is None
+        # Well-formed but nameless: ``from_dict`` defaults ``name`` to "", which is
+        # not another app's name -- ``update_app`` reports the missing field.
+        (empty / APP_MANIFEST_FILENAME).write_text(
+            json.dumps({"version": "1.0.0", "displayName": "Nameless"}), encoding="utf-8"
+        )
+        assert routes_mod._source_manifest_names_another_app(APP, str(empty)) is None
+        a_file = tmp_path / "a-file"
+        a_file.write_text("", encoding="utf-8")
+        assert routes_mod._source_manifest_names_another_app(APP, str(a_file)) is None
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs need a POSIX host")
+    def test_identity_preflight_never_opens_a_manifest_that_is_not_a_regular_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A FIFO named ``app.json`` must not be opened: it would block forever.
+
+        The preflight runs under the app's lifecycle lock, so an ``open()`` that
+        never returns would hold that lock -- and an executor worker -- for the life
+        of the process. The regular-file gate answers ``None`` without opening, which
+        is also what keeps a device like ``/dev/zero`` from being read to no end.
+        """
+        fifo_dir = tmp_path / "fifo-src"
+        fifo_dir.mkdir()
+        os.mkfifo(fifo_dir / APP_MANIFEST_FILENAME)
+
+        def _must_not_parse(path: Path) -> Any:
+            raise AssertionError(f"{path} must not be opened")
+
+        monkeypatch.setattr(routes_mod.AppManifest, "from_json_file", _must_not_parse)
+        assert routes_mod._source_manifest_names_another_app(APP, str(fifo_dir)) is None
+
+    @pytest.mark.asyncio
+    async def test_registry_source_naming_another_app_is_refused_before_any_clone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``registry:<other>`` for app A must not clone and install app B under A's lock.
+
+        ``install_from_registry`` takes its argument as both the entry to clone and the
+        app to install, so the registry branch needs the same identity guard the
+        local branch gets from ``update_app(..., expected_name=name)``.
+        """
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path)
+        enable_app(APP)
+        touched: list[str] = []
+
+        async def _must_not_clone(name: str, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError(f"install_from_registry({name!r}) must not run")
+
+        monkeypatch.setattr(routes_mod, "install_from_registry", _must_not_clone)
+        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n: touched.append("stop"))
+        monkeypatch.setattr(
+            routes_mod, "deregister_app", lambda n: touched.append("deregister")
+        )
+
+        async with TestClient(TestServer(_make_app())) as client:
+            resp = await client.post(
+                f"/api/apps/{APP}/update", json={"source": "registry:some-other-app"}
+            )
+            assert resp.status == 400
+            body = await resp.json()
+        assert body["ok"] is False
+        assert body["code"] == "app_source_name_mismatch"
+        assert "some-other-app" in body["error"]
+        # Nothing of this app was stopped or torn down for a request that was refused.
+        assert touched == []
 
     @pytest.mark.asyncio
     async def test_app_token_cannot_replace_repository_bound_code_from_local_source(
