@@ -455,7 +455,93 @@ def test_rebuild_of_an_empty_fold_writes_nothing(monkeypatch):
     assert wl.read_conductor(CONDUCTOR) is None
 
 
-# -- real units, no mocked resolver and no pre-rendered fold ------------------
+def test_a_fold_at_its_item_ceiling_refuses_the_rebuild_even_on_a_dirty_cache(monkeypatch):
+    """The fold keeps a board's first ``WORK_ITEM_LIMIT`` items; a full fold may
+    be a prefix of a board whose closed items were archived out of ``items/``.
+    Rebuilding from it would re-materialise the prefix and, past the dirty-cache
+    shortcut, unlink every newer item. So it refuses -- and the cache stands."""
+    monkeypatch.setattr(projection, "WORK_ITEM_LIMIT", 1)
+    fold = _rendered(CONDUCTOR, "it_0000abcd")  # exactly one item: the ceiling
+    fold["omitted"] = 1  # ... and a later create the fold could not hold
+    monkeypatch.setattr(
+        projection,
+        "read_slot_projection",
+        lambda slot, name, **_kw: SimpleNamespace(value=fold if name == "work" else {}),
+    )
+    # A live board holding a NEWER item the fold never saw, flagged dirty (the one
+    # state whose documented cure is this rebuild).
+    wl.ensure_conductor(CONDUCTOR, goal="live")
+    newer = wl.apply_conductor_action(CONDUCTOR, "create", title="newest", acceptance={})["item"]
+    wl.mark_cache_dirty(CONDUCTOR, "an unrecorded write could not be undone")
+    before = {p.name: p.read_bytes() for p in wl.items_dir(CONDUCTOR).iterdir()}
+
+    with pytest.raises(wl.WorkLedgerError) as caught:
+        wl.rebuild_from_projection(CONDUCTOR)
+
+    assert caught.value.code == wl.CODE_CREW_LOG_INCOMPLETE
+    assert "ceiling" in str(caught.value)
+    assert {p.name: p.read_bytes() for p in wl.items_dir(CONDUCTOR).iterdir()} == before
+    assert wl.read_work_item(CONDUCTOR, newer.item_id) is not None
+    assert wl.read_work_item(CONDUCTOR, "it_0000abcd") is None
+    assert wl.cache_dirty(CONDUCTOR), "the refusal leaves the flag for the operator"
+
+
+def test_a_full_fold_that_omitted_nothing_is_the_whole_board_and_rebuilds(monkeypatch):
+    """Exactly ``WORK_ITEM_LIMIT`` items and ``omitted == 0`` is a complete record,
+    not a prefix: the rebuild proceeds."""
+    monkeypatch.setattr(projection, "WORK_ITEM_LIMIT", 1)
+    fold = _rendered(CONDUCTOR, "it_0000abcd")  # exactly one item, nothing omitted
+    monkeypatch.setattr(
+        projection,
+        "read_slot_projection",
+        lambda slot, name, **_kw: SimpleNamespace(value=fold if name == "work" else {}),
+    )
+    result = wl.rebuild_from_projection(CONDUCTOR)
+    assert result["items"] == 1
+    assert wl.read_work_item(CONDUCTOR, "it_0000abcd") is not None
+
+
+def test_a_rebuild_sets_the_create_counter_to_what_the_record_holds(monkeypatch):
+    """The stored bound's counter is rebuilt from the fold, not carried over.
+
+    A cache header can hold a count the record does not: higher, after a create
+    whose entry never landed and whose record was then removed, or after the
+    one-time seed from an old board's files; lower, after a hand edit. Rebuilt,
+    ``created_total`` is the number of items the fold retained -- past the ceiling
+    guard the fold dropped no create, and its ``omitted`` there counts entries that
+    are not this board's creates -- so with the fold's one item a counter of 7
+    comes down to 1, and one of 0 comes up to 1, and a board so rebuilt admits
+    exactly the creates the fold has room for.
+    """
+    fold = _rendered(CONDUCTOR, "it_0000abcd")
+    fold["omitted"] = 3  # stragglers of a purged board: not creates, not counted
+    monkeypatch.setattr(
+        projection,
+        "read_slot_projection",
+        lambda slot, name, **_kw: SimpleNamespace(value=fold if name == "work" else {}),
+    )
+    wl.ensure_conductor(CONDUCTOR, goal="ship it")
+    header_path = wl.conductor_dir(CONDUCTOR) / "conductor.json"
+    for stale in (7, 0):
+        stored = json.loads(header_path.read_text(encoding="utf-8"))
+        stored["created_total"] = stale
+        header_path.write_text(json.dumps(stored), encoding="utf-8")
+        assert wl.read_conductor(CONDUCTOR).created_total == stale
+
+        counts = wl.rebuild_from_projection(CONDUCTOR)
+
+        assert (counts["items"], counts["legacy"]) == (1, 0)
+        header = wl.read_conductor(CONDUCTOR)
+        assert header is not None and header.created_total == 1
+    # The rebuilt counter is live: with the bound at the fold's one item, the next
+    # create is refused, and with room for one more it lands and bumps the counter.
+    monkeypatch.setattr(wl, "MAX_STORED_ITEMS_PER_CONDUCTOR", 1)
+    with pytest.raises(wl.WorkLedgerError) as caught:
+        wl.apply_conductor_action(CONDUCTOR, "create", title="one too many", acceptance={})
+    assert caught.value.code == wl.CODE_ITEM_STORE_FULL
+    monkeypatch.setattr(wl, "MAX_STORED_ITEMS_PER_CONDUCTOR", 2)
+    wl.apply_conductor_action(CONDUCTOR, "create", title="second", acceptance={})
+    assert wl.read_conductor(CONDUCTOR).created_total == 2
 
 
 def test_a_bound_workers_real_unit_joins_the_fold_and_its_report_is_rebuilt():
@@ -1291,6 +1377,9 @@ async def test_items_from_before_the_projection_survive_a_rebuild(monkeypatch):
     assert wl.read_binding("chat-9-old-worker") == (CONDUCTOR, old_a.item_id)
     header = wl.read_conductor(CONDUCTOR)
     assert header is not None and header.goal == "old goal"
+    # The counter covers every record the rebuilt board holds: a legacy item's
+    # first recorded mutation materialises it in the fold, where it takes a slot.
+    assert header.created_total == counts["items"] + counts["legacy"] == 3
 
 
 @pytest.mark.asyncio
@@ -1734,7 +1823,7 @@ def test_a_rebuild_that_fails_part_way_leaves_the_cache_as_it_was(monkeypatch):
 
     def _failing_write(path, payload):
         calls["n"] += 1
-        if calls["n"] == 2:  # the header went through; the first item write fails
+        if calls["n"] == 2:  # the item went through; the header write after it fails
             raise OSError("disk full")
         return real_write(path, payload)
 

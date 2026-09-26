@@ -124,7 +124,7 @@ from kiro_crew.session_ledger import EVENT_KINDS as LEDGER_EVENT_KINDS
 from kiro_crew.session_ledger import LEDGER_ENTRY_TYPE
 from kiro_crew.session_ledger import SCHEMA_VERSION as LEDGER_SCHEMA_VERSION
 from kiro_crew.session_ledger import TERMINAL_PHASES as LEDGER_TERMINAL_PHASES
-from kiro_crew.work_vocab import WORK_CONDUCTOR_FIELDS
+from kiro_crew.work_vocab import WORK_CONDUCTOR_FIELDS, WORK_STORED_ITEM_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -3344,10 +3344,23 @@ def work_slots_naming_board(slot: str) -> "tuple[str, ...]":
     return tuple(found)
 
 
-#: Item records the fold retains per board. The WRITER caps a board at far fewer
-#: (it refuses a create past its own limit); this is the fold's own bound, so a
-#: log that somehow carries more still folds to a value of bounded size.
-WORK_ITEM_LIMIT: Final[int] = 256
+#: Item records the fold retains per board -- the fold's own memory bound, so a
+#: log that carries more still folds to a value of bounded size. Two bounds meet
+#: here. The WRITER caps a board's OPEN items at
+#: ``work_ledger.MAX_ITEMS_PER_CONDUCTOR`` (32, live fan-out) and the CREATES it
+#: admits over the board's life, open and closed together, at
+#: ``work_ledger.MAX_STORED_ITEMS_PER_CONDUCTOR`` -- which is THIS number, both read
+#: off ``work_vocab.WORK_STORED_ITEM_LIMIT``. The writer counts those creates in a
+#: monotonic counter in the board's header, the way this fold counts them in an
+#: append-only log, so a record removed from the writer's cache reopens nothing:
+#: every create the writer admits is one recorded create, a board the writer admits
+#: cannot overflow the fold, the fold holds the whole board and ``omitted`` stays 0.
+#: The fold still holds at most ``WORK_ITEM_LIMIT`` items and counts every create
+#: past that in ``omitted``, and ``work_ledger.rebuild_from_projection`` still
+#: refuses a full fold that reports omissions -- only such a fold is necessarily a
+#: prefix of the board rather than the board -- but with the two bounds equal that
+#: guard is defensive, not the working path.
+WORK_ITEM_LIMIT: Final[int] = WORK_STORED_ITEM_LIMIT
 
 #: Newest event lines kept per item, the same tail the stored ledger kept.
 WORK_EVENT_LIMIT: Final[int] = 200

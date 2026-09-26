@@ -27,6 +27,18 @@ WORK_ITEM_STATES: tuple[str, ...] = ("open", "accepted", "rejected", "abandoned"
 WORK_VERDICTS: tuple[str, ...] = ("pass", "fail", "pending", "refused", "error")
 WORK_WORKER_STATUSES: tuple[str, ...] = ("progress", "done", "blocked", "question")
 WORK_EVENT_KINDS: tuple[str, ...] = ("create", "bind", "report", "decision", "verdict", "close")
+#: Items one board may CREATE over its life, open and closed together -- and the
+#: number of item records the crew log's ``work`` fold retains per board. ONE value
+#: on purpose: the store counts a board's creates in a monotonic counter in its
+#: header and the fold counts them in an append-only log, so every create the store
+#: admits is one recorded create, a board that can never admit more creates than the
+#: fold retains can never overflow the fold, and the fold is then always the whole
+#: board rather than a prefix of it. The store enforces it as
+#: ``work_ledger.MAX_STORED_ITEMS_PER_CONDUCTOR``; the fold reads it as
+#: ``crew_log.projection.WORK_ITEM_LIMIT``. Neither side may import the other
+#: (the fold is forbidden from importing the store, and the store must not load
+#: the crew log's storage subsystem on the boot path), so the number lives here.
+WORK_STORED_ITEM_LIMIT: int = 256
 #: Fields a conductor action may set on an item. What the write route logs from
 #: the committed item is what the fold applies to the rebuilt one; the two read
 #: this one table so they cannot drift apart. A worker's fields are fixed.

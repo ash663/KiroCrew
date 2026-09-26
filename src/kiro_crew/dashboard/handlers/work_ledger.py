@@ -87,6 +87,7 @@ _CODE_STATUS: dict[str, int] = {
     work_ledger.CODE_ALREADY_BOUND: 409,
     work_ledger.CODE_ITEM_CLOSED: 409,
     work_ledger.CODE_ITEM_CAP_EXCEEDED: 409,
+    work_ledger.CODE_ITEM_STORE_FULL: 409,
     work_ledger.CODE_DEPTH_EXCEEDED: 409,
     work_ledger.CODE_FIELD_TOO_LONG: 400,
     work_ledger.CODE_INVALID_ACTION: 400,
