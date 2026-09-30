@@ -1489,6 +1489,21 @@ def _parse_iso(value: str) -> datetime | None:
         return None
 
 
+def parse_stamp(value: str) -> datetime | None:
+    """An ISO-8601 stamp as an AWARE datetime, or ``None`` when it is not one.
+
+    :func:`_now_iso` writes local time with an offset, so a stamp read back
+    compares directly; a stamp without an offset — a caller's ``since``, an older
+    record — is taken as local time, the same reading :func:`is_stale` gives its
+    reference. Comparing a naive datetime with an aware one raises, and a read
+    filter must never be the thing that raises.
+    """
+    parsed = _parse_iso(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone() if parsed.tzinfo is None else parsed
+
+
 # --------------------------------------------------------------------------- #
 # Bindings. One file per worker, written only by a conductor's ``bind`` action, and
 # only as a whole-file replacement under that worker's binding lock -- so a

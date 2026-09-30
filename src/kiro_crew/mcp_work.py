@@ -60,6 +60,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import urlencode
 
 # Same cross-module reuse as ``mcp_dashboard``: the authenticated loopback client
 # to the gateway lives in ``mcp_core``, and its heavy dependencies are
@@ -109,6 +110,25 @@ _RECORD_FIELDS: tuple[str, ...] = (
     "round",
     "fails",
 )
+
+#: Fields ``work_ledger_read`` forwards, as a query string on the GET. Same
+#: defence as :data:`_RECORD_FIELDS`: a key that got past the schema still never
+#: reaches the wire.
+_READ_FIELDS: tuple[str, ...] = ("events", "item_id", "state", "since", "compact")
+
+
+def _read_query(args: dict[str, Any]) -> dict[str, Any]:
+    """The caller's read filters as query-string values.
+
+    ``compact`` travels as ``true`` / ``false`` because a query string carries only
+    text, and the route reads exactly those two spellings back into the bool the
+    schema declared. Every other field is already a string or an int.
+    """
+    return {
+        k: (str(v).lower() if isinstance(v, bool) else v)
+        for k, v in args.items()
+        if k in _READ_FIELDS and v is not None
+    }
 
 
 def _tool_definitions() -> list[dict[str, Any]]:
@@ -186,30 +206,99 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "work_ledger_read",
             "description": (
-                "Read the whole work ledger this conductor session owns: the conductor "
+                "Read the work ledger this conductor session owns: the conductor "
                 "record, every item with all its fields, each item's derived 'orphaned', "
                 "'stale' and 'acceptance_concrete' flags, the newest events per item, and "
                 "a ready-to-pipe 'accept_batch' document for the goal-conductor skill's "
-                "accept_eval.py. Takes no arguments — the ledger is your own. accept_batch "
-                "is built from each item's acceptance ALONE and deliberately ignores a "
-                "worker's claimed pr, so a worker cannot point your bar at someone else's "
-                "green pull request. It also leaves out any item whose bar is not concrete "
-                "yet — an unknown kind, or a placeholder ('TBD', blank) or wrong type in a "
-                "field the evaluator reads for that kind, such as a pr_checks pr that is "
-                "not a positive integer — because accept_eval.py can only answer 'error' "
-                "to those; a placeholder in a field it never reads costs an item nothing. "
-                "The item's 'acceptance_concrete' flag is why it is missing, and an "
-                "'accept' write puts it back. Each entry carries that item's status so you can "
-                "apply your own 'done only' filter without a second lookup; the batch is "
-                "not filtered for you. An item is stale only when it has gone quiet AND "
-                "its session is not running AND its last report still left the move with "
-                "the worker, so a worker in a long build is never flagged and neither is "
-                "a 'done' item waiting on you — though a 'done' item you ruled "
-                "verdict=fail on and left open counts again, since that hands the retry "
-                "back to the worker. Answers 'no_ledger' when this session owns "
-                "none yet."
+                "accept_eval.py. With no arguments that is the whole board in the "
+                "store's order, each item with its last 20 events. Every argument "
+                "NARROWS it: events=<n> (0-20) shortens the tail; item_id=<it_xxxxxxxx>, "
+                "state=<open|accepted|rejected|abandoned> or since=<ISO-8601> (items "
+                "created, reported on or closed at or after that stamp) select rows, "
+                "while accept_batch is always built from the WHOLE board regardless; "
+                "compact=true returns only item_id, title, "
+                "state, status, summary, decision, verdict, pr, worker_session_key, "
+                "last_report_at and the derived orphaned / stale / acceptance_concrete "
+                "flags per item, no events, no acceptance and no accept_batch: the "
+                "cheap patrol read, with the full read reserved for the item that "
+                "needs it. For the cycle read narrow with state=open, not since=: a "
+                "silent worker writes no new stamp, so a since-narrowed read drops the "
+                "very row whose stale flag you are there to see; since= answers what "
+                "changed since a stamp. The response is budgeted to stay under an agent runtime's "
+                "tool-result cut: over budget, event tails are emptied, then item rows "
+                "dropped, then accept_batch entries dropped, OLDEST-CREATED first so the "
+                "newest item is always kept, and a lone acceptance still too large to fit "
+                "is replaced by an {elided: true, chars, reason} marker (accept_eval.py "
+                "answers error for it; shrink it with an accept write), and any other value "
+                "or key still too large is replaced by the same marker and named by path in "
+                "elided_fields (a record nothing can bring under the budget collapses to an "
+                "empty envelope with unfittable=true, omitted_count holding the total and "
+                "omitted_items as many ids as fit -- recover with compact=true and item_id, "
+                "which carries no accept_batch, and repair the record before a full "
+                "re-read); the reply must fit both as serialized "
+                "and as delivered after the tool layer's redaction and NFC normalization. "
+                "The reply "
+                "carries truncated=true with dropped_events_for / "
+                "omitted_items / omitted_accept_batch_for / elided_acceptance_for / "
+                "elided_fields and a hint — so a "
+                "truncated read is valid JSON under the budget that still holds the "
+                "newest item, never a torn document. accept_batch is built "
+                "from each item's acceptance ALONE and deliberately "
+                "ignores a worker's claimed pr, so a worker cannot point your bar at "
+                "someone else's green pull request. It also leaves out any item whose bar "
+                "is not concrete yet — an unknown kind, or a placeholder ('TBD', blank) or "
+                "wrong type in a field the evaluator reads for that kind, such as a "
+                "pr_checks pr that is not a positive integer — because accept_eval.py can "
+                "only answer 'error' to those; a placeholder in a field it never reads "
+                "costs an item nothing. The item's 'acceptance_concrete' flag is why it is "
+                "missing, and an 'accept' write puts it back. Each entry carries that "
+                "item's status so you can apply your own 'done only' filter without a "
+                "second lookup; the batch is not filtered for you. An item is stale only "
+                "when it has gone quiet AND its session is not running AND its last "
+                "report still left the move with the worker, so a worker in a long build "
+                "is never flagged and neither is a 'done' item waiting on you — though a "
+                "'done' item you ruled verdict=fail on and left open counts again, since "
+                "that hands the retry back to the worker. Answers 'no_ledger' when this "
+                "session owns none yet."
             ),
-            "inputSchema": {"type": "object", "properties": {}},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "events": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 20,
+                        "description": (
+                            "Newest events to return per item (default and max 20); a "
+                            "smaller value narrows the tail, 0 returns rows without events."
+                        ),
+                    },
+                    "item_id": {
+                        "type": "string",
+                        "description": "Return only this item (it_<8 hex>).",
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["open", "accepted", "rejected", "abandoned"],
+                        "description": "Return only items in this state.",
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": (
+                            "ISO-8601 stamp; return only items created, reported on "
+                            "or closed at or after it."
+                        ),
+                    },
+                    "compact": {
+                        "type": "boolean",
+                        "description": (
+                            "Status columns only, the derived orphaned / stale / "
+                            "acceptance_concrete flags included — no events, acceptance or "
+                            "accept_batch."
+                        ),
+                    },
+                },
+            },
         },
         {
             "name": "work_ledger_rebuild",
@@ -387,7 +476,11 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         )
 
     if name == "work_ledger_read":
-        resp = _get(_READ_PATH, session_key=caller_key)
+        query = _read_query(args)
+        if query:
+            resp = _get(f"{_READ_PATH}?{urlencode(query)}", session_key=caller_key)
+        else:
+            resp = _get(_READ_PATH, session_key=caller_key)
         if resp.get("error"):
             return _refusal("could not read your work ledger", resp)
         # The ledger holds worker-authored prose written from untrusted work, and a

@@ -2403,6 +2403,15 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # the keystone and audits the change. The output it produces is that
         # boolean, never agent-authored text, so it is not an egress boundary.
         "dashboard/handlers/credential_redaction.py",
+        # Measurement-side, not egress: the work-ledger read fits its reply to a
+        # size budget and, to do so, measures how long the text will be AS
+        # DELIVERED -- it runs the redactor (and the response sanitizer) over a
+        # candidate reply only to take the resulting length, because a redaction
+        # can lengthen text. What the route returns is the unredacted document;
+        # the MCP tool layer that carries it to the model (`mcp_work.py`, through
+        # `build_tool_response`) is the egress sink and applies the redaction for
+        # real. Nothing redacted leaves this module.
+        "dashboard/handlers/work_ledger.py",
     }
 )
 

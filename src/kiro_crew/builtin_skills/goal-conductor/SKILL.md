@@ -282,6 +282,35 @@ Each cycle:
    history. An item is never `stale` on the strength of silence alone: its worker
    also has to be not running, and its last word has to have left the next move
    with the worker, so a `done` item waiting on you is not flagged.
+
+   With no arguments it is the whole board in the store's order, each item with
+   its last 20 events — the read as it always was. Every argument narrows it, and
+   the one addition is a size guarantee: the read is budgeted so a runtime that
+   cuts a long tool result never costs you the newest item. When it had to trim,
+   event tails are emptied, then rows dropped, then `accept_batch` entries
+   dropped, **oldest-created first** (creation order, not last activity: activity
+   order would sacrifice the quiet rows `stale` exists to surface, and would let
+   whichever worker reported last decide which siblings you see), and a lone
+   acceptance too large to show is replaced by an `{"elided": true, ...}` marker
+   for which `accept_eval.py` answers `error` — shrink that bar with `accept`; any
+   other value or key still too large gets the same marker and is named by path
+   in `elided_fields`; a record nothing can bring under the budget comes back as
+   an empty envelope with `unfittable: true`, `omitted_count` holding the total
+   and `omitted_items` as many ids as fit — recover the status columns with
+   `compact=true&item_id=<id>` (no `accept_batch`, so the sibling that cannot
+   fit is not carried along) and repair the record before a full re-read. The
+   reply then carries `truncated: true` with
+   `dropped_events_for` / `omitted_items` / `omitted_accept_batch_for` /
+   `elided_acceptance_for` / `elided_fields` and a hint, and is still valid JSON
+   under the budget. Shape the read to the cycle: `compact=true` for a patrol
+   that only needs status / summary / decision / verdict and the `orphaned` /
+   `stale` / `acceptance_concrete` flags per item (no events, no acceptance, no
+   `accept_batch`); `item_id=<id>` for the one item whose history you must read,
+   `events=<n>` to shorten every tail; `state=open` to narrow a wide board for
+   the cycle read. Reserve `since=<stamp>` for "what changed since": a silent
+   worker writes no new stamp, so a `since`-narrowed cycle read would drop the
+   very row whose `stale` flag you are there to see. `accept_batch` is always the
+   whole bar, whatever the row filters were; only the budget trim can shorten it.
 2. **Act on three statuses, and only three:**
 
    | status | what it means | what you do |

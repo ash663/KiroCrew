@@ -53,7 +53,8 @@ An item is the unit of dispatch. It holds:
 
 The conductor writes its half with `work_ledger_record` (one action per call:
 `goal`, `create`, `bind`, `decide`, `verdict`, `accept`, `close`) and reads the
-whole ledger back with `work_ledger_read`. A worker writes its half with
+ledger back with `work_ledger_read` (see below for its optional narrowing
+arguments). A worker writes its half with
 `work_report` and reads its own item with `work_brief`. A conductor whose ledger
 files read as damaged or missing rewrites them from the crew log with
 `work_ledger_rebuild`: every accepted write was recorded there, so the files are a
@@ -151,9 +152,61 @@ Reports belong at real milestones, not on a timer.
 when longer, so a report that lands is a report that landed whole. Evidence goes in `artifacts` as
 pointers — a branch, a commit, a path, a pull request number.
 
+## `work_ledger_read` — what a conductor reads
+
+One call returns the conductor record, every item with its fields and its
+derived `orphaned` / `stale` / `acceptance_concrete` flags, each item's newest
+events, and the `accept_batch` document the acceptance evaluator takes. With no
+arguments it is the whole board in the store's order, twenty events per item —
+the read as it always was. Every argument narrows it.
+
+The one thing added to an argument-less read is a size guarantee. An agent
+runtime cuts a long tool result at a fixed length, and a cut lands wherever the
+length falls, so the reply is kept under a budget: when it had to trim, event
+tails are emptied, then whole item rows dropped, then `accept_batch` entries
+dropped, oldest-created first so the newest item is always kept, and a lone
+acceptance still too large to fit is replaced by an `{"elided": true, "chars":
+…, "reason": …}` marker — and any other value or key still too large (a record grown
+by hand past what the writers cap) by the same marker, named by path in
+`elided_fields`; a record nothing can bring under the budget comes back as an
+empty envelope with `unfittable: true`, `omitted_count` holding the total and
+`omitted_items` as many ids as fit; recover the status columns with
+`compact=true&item_id=<id>`, which carries no `accept_batch` and so not the
+sibling that cannot fit, and repair the record (an `accept` write with a smaller
+acceptance, or `work_ledger_rebuild`) before a full re-read. The
+reply carries `truncated: true`, `dropped_events_for` / `omitted_items` /
+`omitted_accept_batch_for` / `elided_acceptance_for` / `elided_fields`, and a
+one-line hint. It is always valid JSON under the budget, and it has to fit twice
+over — as serialized, and as delivered after the redaction the tool layer
+applies, which can lengthen a link-heavy reply. The trim ranks by creation, not by last activity, on purpose: activity
+order would sacrifice the quiet rows `stale` exists to surface, and would let
+whichever worker reported last decide which of its siblings the conductor sees;
+`since=` is the tool for "what moved". The evaluator answers `error` for an
+elided bar — the right verdict for one that could not be read — and an `accept`
+write with a smaller acceptance is what restores it.
+
+Every argument is optional and narrows or shapes the read:
+
+| Argument | Effect |
+|---|---|
+| `events=<n>` | events per item, 0 to 20 (default 20) |
+| `item_id=<it_…>` | one item |
+| `state=<open\|accepted\|rejected\|abandoned>` | items in that state |
+| `since=<ISO-8601>` | items created, reported on or closed at or after that stamp |
+| `compact=true` | per item only `item_id`, `title`, `state`, `status`, `summary`, `decision`, `verdict`, `pr`, `worker_session_key`, `last_report_at` and the derived `orphaned` / `stale` / `acceptance_concrete` flags; no events, no acceptance, no `accept_batch` |
+
+For the cycle read, narrow with `state=open`; reserve `since=<stamp>` for "what
+changed since" — a silent worker writes no new stamp, so a `since`-narrowed cycle
+read would drop the very row whose `stale` flag the patrol exists to notice.
+
+`accept_batch` is the bar's own document and is always built from the whole
+board, whatever the row filters were — a filtered read never narrows what the
+evaluator is asked. The one thing that can shorten it is the budget trim, which
+drops its oldest-created entries and says which.
+
 ## Why `done` is a claim
 
-A worker's `done` never closes an item. The conductor reads its whole ledger
+A worker's `done` never closes an item. The conductor reads its ledger
 with `work_ledger_read` — every item, its own derived staleness flags, and a
 ready-to-evaluate batch — runs the acceptance evaluator against the item's own
 condition, and records the answer with `work_ledger_record` as a `verdict`:

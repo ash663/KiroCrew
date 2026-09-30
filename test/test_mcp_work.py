@@ -48,14 +48,128 @@ def test_every_tool_has_a_registered_schema():
         assert schema.tool_name == name
 
 
-def test_the_two_no_argument_tools_declare_an_empty_schema():
+def test_the_brief_tool_declares_an_empty_schema():
     """Registered-but-empty, not unregistered: an unregistered schema admits an
     unexpected argument, an empty registered one rejects it."""
-    for name in ("work_brief", "work_ledger_read"):
-        definition = next(t for t in mcp_work._list_tools() if t["name"] == name)
-        assert definition["inputSchema"]["properties"] == {}
-        assert "required" not in definition["inputSchema"]
-        assert MCP_WORK_SCHEMAS[name].fields == []
+    definition = next(t for t in mcp_work._list_tools() if t["name"] == "work_brief")
+    assert definition["inputSchema"]["properties"] == {}
+    assert "required" not in definition["inputSchema"]
+    assert MCP_WORK_SCHEMAS["work_brief"].fields == []
+
+
+def test_work_ledger_read_advertises_the_five_optional_filters():
+    """Every parameter narrows or shapes the read and none is required, so a
+    conductor that passes nothing still gets its whole board — and the advertised
+    schema, the validation schema and the forwarded fields name the same five."""
+    definition = next(t for t in mcp_work._list_tools() if t["name"] == "work_ledger_read")
+    props = definition["inputSchema"]["properties"]
+    assert set(props) == {"events", "item_id", "state", "since", "compact"}
+    assert "required" not in definition["inputSchema"]
+    assert {f.name for f in MCP_WORK_SCHEMAS["work_ledger_read"].fields} == set(props)
+    assert set(mcp_work._READ_FIELDS) == set(props)
+    assert all(not f.required for f in MCP_WORK_SCHEMAS["work_ledger_read"].fields)
+    # The advertised bounds are the validated bounds.
+    events = next(f for f in MCP_WORK_SCHEMAS["work_ledger_read"].fields if f.name == "events")
+    assert (props["events"]["minimum"], props["events"]["maximum"]) == (
+        events.min_val,
+        events.max_val,
+    )
+    state = next(f for f in MCP_WORK_SCHEMAS["work_ledger_read"].fields if f.name == "state")
+    assert set(props["state"]["enum"]) == state.allowed
+
+
+def test_work_ledger_read_description_states_the_shape_a_conductor_relies_on():
+    """What an argument-less read still is, how each argument narrows it, and the
+    truncation marker are what a conductor plans its patrol read around, so the
+    description must say them — and must not claim a changed default."""
+    definition = next(t for t in mcp_work._list_tools() if t["name"] == "work_ledger_read")
+    text = definition["description"]
+    assert "store's order" in text
+    assert "last 20 events" in text
+    assert "NARROWS" in text and "events=<n>" in text
+    assert "compact=true" in text
+    assert "truncated=true" in text
+    assert "OLDEST-CREATED first" in text
+    assert "NEWEST FIRST" not in text and "last 5 events" not in text
+    assert "Takes no arguments" not in text
+    events = definition["inputSchema"]["properties"]["events"]["description"]
+    assert "default and max 20" in events
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"events": 21},
+        {"events": -1},
+        {"events": True},
+        {"item_id": "it_zz"},
+        {"item_id": "../etc"},
+        {"state": "closed"},
+        {"since": "x" * 41},
+        {"compact": "yes"},
+        {"status": "done"},
+    ],
+)
+def test_work_ledger_read_refuses_an_out_of_shape_filter(args):
+    """Refused at the schema, before any identity is resolved or wire is touched."""
+    from kiro_crew.validation import ValidationError
+
+    with pytest.raises(ValidationError):
+        mcp_work._validate_args("work_ledger_read", args)
+
+
+def test_work_ledger_read_forwards_only_known_filters_as_query(monkeypatch):
+    """The filters travel as a query string on the same GET; an unknown key that
+    got past validation still never reaches the wire, and a bool is spelled the
+    way the route reads it back."""
+    monkeypatch.setattr(mcp_core, "_resolve_session_key_strict", lambda: "chat-x")
+    seen: dict[str, Any] = {}
+
+    def _fake_get(path: str, session_key: str | None = None, **k: Any) -> dict:
+        seen["path"] = path
+        seen["session_key"] = session_key
+        return {"conductor": {}, "items": []}
+
+    monkeypatch.setattr(mcp_work, "_get", _fake_get)
+    mcp_work._call_tool_inner(
+        "work_ledger_read",
+        {
+            "events": 3,
+            "item_id": "it_0000abcd",
+            "state": "open",
+            "since": "2026-01-02T03:04:05+00:00",
+            "compact": True,
+            "verdict": "pass",
+        },
+    )
+    from urllib.parse import parse_qs, urlsplit
+
+    split = urlsplit(seen["path"])
+    assert split.path == mcp_work._READ_PATH
+    assert parse_qs(split.query, keep_blank_values=True) == {
+        "events": ["3"],
+        "item_id": ["it_0000abcd"],
+        "state": ["open"],
+        "since": ["2026-01-02T03:04:05+00:00"],
+        "compact": ["true"],
+    }
+    assert seen["session_key"] == "chat-x"
+
+
+def test_work_ledger_read_with_no_filters_hits_the_bare_path(monkeypatch):
+    """No arguments is still the common call, and it must not grow a trailing ``?``."""
+    monkeypatch.setattr(mcp_core, "_resolve_session_key_strict", lambda: "chat-x")
+    seen: dict[str, Any] = {}
+
+    def _fake_get(path: str, session_key: str | None = None, **k: Any) -> dict:
+        seen["path"] = path
+        return {"conductor": {}, "items": []}
+
+    monkeypatch.setattr(mcp_work, "_get", _fake_get)
+    mcp_work._call_tool_inner("work_ledger_read", {})
+    assert seen["path"] == mcp_work._READ_PATH
+    mcp_work._call_tool_inner("work_ledger_read", {"compact": False})
+    assert seen["path"] == f"{mcp_work._READ_PATH}?compact=false"
 
 
 def test_the_worker_report_tool_advertises_no_conductor_field():

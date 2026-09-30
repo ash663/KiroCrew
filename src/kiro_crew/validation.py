@@ -4006,7 +4006,22 @@ WORK_REPORT_SCHEMA = ToolSchema(
     custom_validator=lambda cleaned: _validate_work_artifacts(cleaned.get("artifacts")),
 )
 
-WORK_LEDGER_READ_SCHEMA = ToolSchema(tool_name="work_ledger_read")
+#: Every parameter of ``work_ledger_read`` narrows or shapes the read; none is
+#: required, and with none the whole board comes back as it always has. The
+#: ``events`` ceiling restates the route's own tail cap (``_MAX_EVENT_TAIL`` in
+#: ``dashboard/handlers/work_ledger.py``), pinned together by its tests.
+WORK_LEDGER_READ_SCHEMA = ToolSchema(
+    tool_name="work_ledger_read",
+    fields=[
+        FieldSpec("events", int, min_val=0, max_val=20),
+        FieldSpec("item_id", str, max_len=16, pattern=re.compile(r"^it_[0-9a-f]{8}$")),
+        FieldSpec("state", str, allowed=_WORK_ITEM_STATES),
+        # Long enough for an offset-carrying ISO-8601 stamp with microseconds;
+        # whether it PARSES is the route's check, with the store's own reader.
+        FieldSpec("since", str, max_len=40),
+        FieldSpec("compact", bool),
+    ],
+)
 WORK_LEDGER_REBUILD_SCHEMA = ToolSchema(tool_name="work_ledger_rebuild")
 
 WORK_LEDGER_RECORD_SCHEMA = ToolSchema(

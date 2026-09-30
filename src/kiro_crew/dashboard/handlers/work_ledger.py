@@ -43,8 +43,12 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
-from typing import Any
+import re
+from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
+from typing import Any, TypeVar
 
 from aiohttp import web
 
@@ -62,10 +66,13 @@ from kiro_crew.dashboard.handlers.cron import _recognize_session
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.history import is_incognito_transcript
 from kiro_crew.messaging.link import is_channel_session_key
+from kiro_crew.platform import redact_via_context
 from kiro_crew.validation import (
+    WORK_LEDGER_READ_SCHEMA,
     WORK_LEDGER_RECORD_SCHEMA,
     WORK_REPORT_SCHEMA,
     ValidationError,
+    sanitize_string,
     validate_tool_args,
 )
 from kiro_crew.work_ledger import WorkLedgerError
@@ -1068,7 +1075,7 @@ def _report(
 
 
 async def api_work_ledger_get(request: web.Request) -> web.Response:
-    """GET /api/work-ledger — the whole ledger this session owns.
+    """GET /api/work-ledger — the ledger this session owns.
 
     The conductor record, every item with all its fields, the derived
     ``orphaned`` / ``stale`` / ``acceptance_concrete`` flags, each item's newest
@@ -1080,11 +1087,31 @@ async def api_work_ledger_get(request: web.Request) -> web.Response:
     on the item row is why. Each entry carries the item's ``status`` so the conductor
     can apply its own "``done`` only" filter without a second lookup — the filter stays
     the conductor's to apply.
+
+    With no arguments the answer is what it always was: the whole board in the
+    store's order, each item with its last :data:`_MAX_EVENT_TAIL` events. Every
+    argument NARROWS that: ``events=<n>`` shortens the tail, ``item_id``, ``state``
+    and ``since`` select rows (``accept_batch`` stays built from the WHOLE board,
+    because its contract is the whole bar), and ``compact=true`` returns the status
+    columns alone — the derived flags among them, so a patrol read still sees a
+    dead worker. The one thing added to an argument-less read is a size guarantee:
+    the reader is a model whose runtime cuts a tool result at a fixed length, and a
+    payload over :data:`_RESPONSE_BUDGET_CHARS` is trimmed by :func:`_fit_to_budget`
+    — event tails, then item rows, then batch entries, oldest-created first so the
+    newest item is always kept, then a lone acceptance too large to fit and last
+    any other oversized value are replaced by an elision marker — into valid JSON
+    under the budget carrying a ``truncated`` marker, never handed on to be torn.
     """
     key, refusal = await _caller_key(request, "work_ledger_read")
     if refusal is not None:
         return refusal
     assert key is not None
+    options, bad = _read_options(request)
+    if bad is not None:
+        return bad
+    assert options is not None
+    compact = bool(options.get("compact", False))
+    tail = int(options.get("events", _MAX_EVENT_TAIL))
     # Under the board lock for the same reason the brief read is: a write's
     # cache commit and its record append are two steps, and a read between them
     # would publish a mutation the record may yet roll back. The header and the
@@ -1097,22 +1124,31 @@ async def api_work_ledger_get(request: web.Request) -> web.Response:
         if dirty is not None:
             return dirty
         items = await asyncio.to_thread(work_ledger.list_work_items, key)
+        # The store's own order, as it always was. What the budget trim below
+        # sacrifices first is decided by AGE, not by position in this list, so the
+        # drop order is computed here from the whole board — the filtered rows and
+        # the batch both draw on it — oldest created first.
+        drop_order = [item.item_id for item in sorted(items, key=_age_key)]
+        shown = [item for item in items if _passes_filters(item, options)]
         event_tails: dict[str, list[work_ledger.WorkEvent]] = {}
-        for item in items:
-            event_tails[item.item_id] = await asyncio.to_thread(
-                _tail_events, key, item.item_id, _MAX_EVENT_TAIL
-            )
+        if not compact:
+            for item in shown:
+                event_tails[item.item_id] = await asyncio.to_thread(
+                    _tail_events, key, item.item_id, tail
+                )
     assert record is not None
 
     state: DashboardState = request.app["state"]
+    rows: list[dict[str, Any]] = []
     # Liveness is read straight off the dashboard's own slot table rather than
     # over HTTP: this handler runs in the process that owns it. ``orphaned`` asks
     # whether the CONDUCTOR's slot is still open and ``stale`` whether the
     # WORKER's is — the conjunction with the staleness window is what keeps a
-    # worker in a thirty-minute build from being flagged.
+    # worker in a thirty-minute build from being flagged. Derived for the compact
+    # read too: a patrol that only reads the status columns still has to see a
+    # dead worker, and these three are in-process slot reads, not documents.
     conductor_alive = _slot_open(state, key)
-    rows: list[dict[str, Any]] = []
-    for item in items:
+    for item in shown:
         row = item.to_dict()
         row["orphaned"] = work_ledger.is_orphaned(item, conductor_slot_exists=conductor_alive)
         row["stale"] = work_ledger.is_stale(
@@ -1122,13 +1158,29 @@ async def api_work_ledger_get(request: web.Request) -> web.Response:
         # it a conductor sees an item it dispatched simply missing from the batch and
         # has no way to tell "bar not filled in yet" from "the read dropped it".
         row["acceptance_concrete"] = work_ledger.is_acceptance_concrete(item.acceptance)
+        if compact:
+            rows.append(_compact_row(row))
+            continue
         events = event_tails[item.item_id]
         row["events"] = [event.to_dict() for event in events]
         rows.append(row)
 
+    payload: dict[str, Any] = {"conductor": record.to_dict(), "items": rows}
+    if compact:
+        payload["compact"] = True
+    else:
+        # The whole board (never the filtered rows), in the store's order.
+        payload["accept_batch"] = work_ledger.accept_batch(items)
+    # Serialized here, in the shape the tool layer re-emits (indented, non-ASCII
+    # kept), so the budget is measured on the text the model receives. Fitting
+    # re-serializes a multi-megabyte board a handful of times, which is why it
+    # runs off the loop.
+    text = await asyncio.to_thread(_fit_to_budget, payload, _RESPONSE_BUDGET_CHARS, drop_order)
     if why := _contained_channel_caller(request, request.headers.get("X-Session-Key", "")):
-        # Same post-await re-check as ``work_brief``. This payload is larger: every
-        # item's acceptance bar plus worker-authored prose for the whole fleet.
+        # Same post-await re-check as ``work_brief``, and it sits AFTER the last
+        # await on this path — the fit above — so nothing can attach a mirror
+        # between the check and the reply. This payload is larger: every item's
+        # acceptance bar plus worker-authored prose for the whole fleet.
         _audit(
             request.headers.get("X-Session-Key", "") or "anonymous",
             "work_ledger_read",
@@ -1141,20 +1193,754 @@ async def api_work_ledger_get(request: web.Request) -> web.Response:
             f"read, so it is no longer one to return it to: {why}.",
         )
     _audit(key, "work_ledger_read", "ok", resources=f"{len(rows)} item(s)")
-    return web.json_response(
-        {
-            "conductor": record.to_dict(),
-            "items": rows,
-            "accept_batch": work_ledger.accept_batch(items),
-        }
-    )
+    return web.json_response(text=text)
 
 
-#: Events returned per item. The log is append-only and capped at 200 per item,
+#: The most events a read returns per item — the default, and the ceiling
+#: ``events=<n>`` may ask for. The log is append-only and capped at 200 per item,
 #: so an unbounded slice would eventually be the largest thing in a conductor's
 #: context — the opposite of what a patrol cycle needs. Newest kept, oldest
 #: dropped, which is the slice ``read_events``' own ``limit`` already applies.
+#: The Crew page's board reads this many too.
 _MAX_EVENT_TAIL = 20
+
+#: The most characters a read hands the tool layer, measured on the indented
+#: JSON the model receives. Sized under the fixed length at which an agent
+#: runtime cuts a tool result — a cut lands wherever the length falls, tearing
+#: the JSON and losing whatever was serialized last — with room for the
+#: redaction pass and the runtime's own framing. Over it, :func:`_fit_to_budget`
+#: drops event tails, then item rows, then ``accept_batch`` entries, oldest
+#: created first, elides a lone acceptance that still does not fit, and says so.
+_RESPONSE_BUDGET_CHARS = 50_000
+
+#: What an elided acceptance says in place of itself. The marker has no ``kind``,
+#: so ``accept_eval.py`` answers ``error`` for the entry — the right verdict for a
+#: bar that could not be read — and the conductor's remedy is the ``accept`` write
+#: the reason names.
+_ELISION_REASON = "acceptance exceeds the read budget; shrink the acceptance document"
+
+#: The same marker for any OTHER value the fifth trim stage has to elide — a field
+#: the store's writers cap but a hand-grown record still carries oversized. Its
+#: path in ``elided_fields`` says which; the remedy is to shrink the stored value.
+_FIELD_ELISION_REASON = "value exceeds the read budget; shrink the stored record"
+
+#: Where a ``created_at`` that will not parse sorts: below every real stamp, so
+#: such an item counts as the OLDEST on the board and is what a trim sacrifices
+#: first, rather than failing the read.
+_STAMP_FLOOR = datetime.min.replace(tzinfo=timezone.utc)
+
+#: The fields a ``compact=true`` row carries: the columns a patrol cycle reads
+#: to decide who moves next — the three derived flags included, since a dead
+#: worker is exactly what a patrol is there to notice — and nothing that is a
+#: document in its own right (``acceptance``, ``artifacts``, the events).
+_COMPACT_ROW_FIELDS: tuple[str, ...] = (
+    "item_id",
+    "title",
+    "state",
+    "status",
+    "summary",
+    "decision",
+    "verdict",
+    "pr",
+    "worker_session_key",
+    "last_report_at",
+    "orphaned",
+    "stale",
+    "acceptance_concrete",
+)
+
+#: Query-string spellings of a boolean. ``compact=true`` is what the tool layer
+#: sends; the rest are what a hand-typed loopback call plausibly spells.
+_QUERY_TRUE = frozenset({"1", "true", "yes", "on"})
+_QUERY_FALSE = frozenset({"0", "false", "no", "off", ""})
+
+
+def _read_options(
+    request: web.Request,
+) -> tuple[dict[str, Any], None] | tuple[None, web.Response]:
+    """The read's query parameters, validated against ``WORK_LEDGER_READ_SCHEMA``.
+
+    A query string carries only strings, so ``events`` and ``compact`` are coerced
+    to the types the schema declares before it runs; everything else — the item-id
+    shape, the ``state`` vocabulary, the caps — is the schema's own check, the same
+    one the tool layer applies, so the two cannot disagree about what is accepted.
+    An unknown parameter is refused rather than ignored: a filter that silently did
+    not apply would hand back the whole board as if it were the narrowed one.
+    """
+    raw: dict[str, Any] = {}
+    for name in request.query:
+        value = request.query.get(name, "")
+        if value == "":
+            # An empty value is refused for every parameter, not only the ones whose
+            # own check happens to catch it: the schema skips a pattern on an empty
+            # string, so ``item_id=`` would otherwise select nothing and answer 200
+            # with no rows beside a whole-board batch — a filter that silently did
+            # not apply.
+            return None, _refuse_400(
+                work_ledger.CODE_INVALID_VALUE, f"{name}: expected a value", name
+            )
+        if name == "events":
+            try:
+                raw[name] = int(value)
+            except ValueError:
+                return None, _refuse_400(
+                    work_ledger.CODE_INVALID_VALUE, "events: expected an integer", "events"
+                )
+        elif name == "compact":
+            lowered = value.strip().lower()
+            if lowered in _QUERY_TRUE:
+                raw[name] = True
+            elif lowered in _QUERY_FALSE:
+                raw[name] = False
+            else:
+                return None, _refuse_400(
+                    work_ledger.CODE_INVALID_VALUE, "compact: expected true or false", "compact"
+                )
+        else:
+            raw[name] = value
+    try:
+        cleaned = validate_tool_args(raw, WORK_LEDGER_READ_SCHEMA)
+    except ValidationError as exc:
+        # An unknown key is a wrong VALUE for the query, whatever it is called; the
+        # store-code mapping reads the field name and would call a stray
+        # ``status=`` an ``invalid_status``, which names a bound this read has not.
+        unknown = "unknown field" in (exc.message or "")
+        code = work_ledger.CODE_INVALID_VALUE if unknown else _validation_code(exc)
+        return None, _refuse_400(code, str(exc), exc.field)
+    since = cleaned.get("since")
+    if since is not None:
+        moment = work_ledger.parse_stamp(since)
+        if moment is None:
+            return None, _refuse_400(
+                work_ledger.CODE_INVALID_VALUE, "since: expected an ISO-8601 timestamp", "since"
+            )
+        cleaned["since"] = moment
+    return cleaned, None
+
+
+def _passes_filters(item: work_ledger.WorkItem, options: dict[str, Any]) -> bool:
+    """Whether *item* survives the read's ``item_id`` / ``state`` / ``since`` filters.
+
+    ``since`` is judged on the newest of the stamps another party writes —
+    ``created_at``, ``last_report_at``, ``closed_at`` — so it answers "what moved
+    since my last cycle" from the store's own fields, without reading any event log.
+    The conductor's own decisions do not move an item's stamp: it made them.
+    """
+    item_id = options.get("item_id")
+    if item_id is not None and item.item_id != item_id:
+        return False
+    state = options.get("state")
+    if state is not None and item.state != state:
+        return False
+    since = options.get("since")
+    if since is not None:
+        stamps = [
+            parsed
+            for parsed in (
+                work_ledger.parse_stamp(value)
+                for value in (item.created_at, item.last_report_at, item.closed_at)
+                if value
+            )
+            if parsed is not None
+        ]
+        if not stamps or max(stamps) < since:
+            return False
+    return True
+
+
+def _age_key(item: work_ledger.WorkItem) -> tuple[bool, datetime, str]:
+    """Oldest-first sort key for the budget trim: the creation stamp AS A MOMENT,
+    then the id.
+
+    ``created_at`` is local time with an offset (:func:`work_ledger._now_iso`), and
+    text order is not time order across a DST fall-back: ``01:30-04:00`` reads
+    after ``01:15-05:00`` yet happened forty-five minutes earlier. Parsing with
+    :func:`work_ledger.parse_stamp` compares the moments; a stamp that will not
+    parse takes :data:`_STAMP_FLOOR`, so the key never raises inside a read.
+
+    Creation, not last activity, on purpose. Ranking by ``last_report_at`` would
+    sacrifice the QUIET rows first, and a quiet row is exactly what ``stale`` exists
+    to surface; it would also let whichever worker reported last decide which of
+    its siblings the conductor gets to see. ``created_at`` is written once by the
+    server, so the victim set of a trimmed read is stable across a cycle and no
+    reporting cadence moves it. "What moved" is ``since=``'s question, not the trim's.
+    """
+    moment = work_ledger.parse_stamp(item.created_at)
+    # The parse result leads the key: a floor alone would rank an unreadable stamp
+    # NEWER than a real one at the calendar's start with a positive offset.
+    return (moment is not None, moment or _STAMP_FLOOR, item.item_id)
+
+
+def _compact_row(full: dict[str, Any]) -> dict[str, Any]:
+    """The status columns of a full row (fields plus the derived flags)."""
+    return {name: full[name] for name in _COMPACT_ROW_FIELDS}
+
+
+def _fit_to_budget(payload: dict[str, Any], budget: int, drop_order: Sequence[str]) -> str:
+    """Serialize *payload*, trimming it to *budget* chars as valid JSON.
+
+    *drop_order* is the whole board's item ids, OLDEST first (:func:`_age_key`);
+    it decides what goes, independently of where a row or batch entry sits in the
+    response. An id it does not name ranks oldest. Four stages, each run only while
+    the text is still over budget: empty the event tails, oldest item first; drop
+    whole rows, oldest first; drop ``accept_batch`` entries, oldest first; and last,
+    replace the acceptance documents still standing — the remaining row's
+    ``acceptance`` and the remaining batch entry's ``accept``, largest first — with
+    an elision marker ``{"elided": true, "chars": <its serialized length>,
+    "reason": ...}``. Neither the newest row nor the newest batch entry is ever
+    dropped: a read that answers with nothing has nothing to say about the live
+    item, which is the one the reader is there for.
+
+    The fourth stage is what makes "valid JSON under the budget" hold for every
+    record the store's own writers produce. They cap every other field — title,
+    summary, decision, artifacts, goal — but an acceptance may run to
+    ``MAX_RECORD_BYTES // 2``, so one row plus its own batch entry could otherwise
+    carry two copies of a document larger than the budget and the reply would still
+    be torn by the runtime's cut. With the bars elided, everything a writer can have
+    produced is capped and fits. An elided bar has no ``kind``, so ``accept_eval.py``
+    answers ``error`` for it — the right verdict for a bar that could not be read;
+    the conductor shrinks it with an ``accept`` write.
+
+    A fifth stage makes it unconditional. A record grown by hand — a
+    ``conductor.json`` whose ``goal`` runs to 200,000 chars, an item whose artifact
+    KEY does — still reads under the reader's 1 MB ceiling, and no stage above
+    touches the header or a key. So while the text is still over budget, the
+    LARGEST string anywhere in the payload, value or key (header included; this
+    function's own marker keys and anything already elided are skipped), is
+    replaced by the same marker — a key by a ``[elided key: n chars]`` key that
+    keeps its value — and its JSON path appended to ``elided_fields``
+    (``conductor.goal``, ``items[0].artifacts.evidence``); the stage stops when
+    the text fits or nothing larger than its marker is left. Should even that not
+    fit — bulk that is neither a string value nor a key — the reply collapses to a
+    minimal envelope (:func:`_unfittable_envelope`): the conductor's key, no rows,
+    an empty batch, ``truncated`` + ``unfittable``, a hint naming the remedy, the
+    item count under ``omitted_count`` and as many ids under ``omitted_items`` as
+    fit — bounded by construction and measured. The same envelope answers a record
+    nested deeper than the serializer can follow (``RecursionError`` on the first
+    dump). Nothing here asserts: a read must answer.
+
+    "Fits" means twice over (:func:`_fits`): as serialized, and AS DELIVERED. The
+    MCP layer redacts the serialized reply and then NFC-normalizes it before the
+    model reads it, and both can lengthen text — a short credential-bearing link
+    becomes a placeholder several times its size, a decomposing character becomes
+    three — so every stage also checks the delivered length (:func:`_delivered`),
+    through the same passes that layer applies.
+
+    A trimmed payload carries ``truncated: true``, the ids whose tails, rows, batch
+    entries or acceptances went, the paths of any other elided field or key, and a
+    one-line hint naming the narrower reads that recover them; an untrimmed one
+    carries none of those keys.
+    """
+    rows: list[dict[str, Any]] = payload.get("items") or []
+    with_batch = "accept_batch" in payload
+    # Every id the payload names, rows AND batch entries: a filtered read narrows the
+    # rows while the batch stays the whole board, so an envelope that counted the
+    # rows alone would leave a sibling's omitted bar uncounted and unnamed.
+    original_ids = [str(row.get("item_id", "")) for row in rows if isinstance(row, dict)]
+    batch_doc = payload.get("accept_batch")
+    if isinstance(batch_doc, dict) and isinstance(batch_doc.get("items"), list):
+        for entry in batch_doc["items"]:
+            if isinstance(entry, dict) and str(entry.get("id", "")) not in original_ids:
+                original_ids.append(str(entry.get("id", "")))
+    # Before the first serialization, and iteratively: a lone surrogate read back
+    # from a hand-edited record is a code point no UTF-8 encoder accepts, so it is
+    # replaced in every string and key first (colliding keys kept distinct), and a
+    # record nested deeper than the serializer can follow raises RecursionError,
+    # which is answered with the envelope rather than a failed read.
+    _without_lone_surrogates(payload)
+    try:
+        return _trim(payload, budget, drop_order, original_ids, with_batch)
+    except RecursionError:
+        return _dumps(
+            _unfittable_envelope(
+                payload,
+                budget,
+                original_ids,
+                with_batch,
+                why="the record nests deeper than the serializer can follow",
+            )
+        )
+
+
+def _trim(
+    payload: dict[str, Any],
+    budget: int,
+    drop_order: Sequence[str],
+    original_ids: list[str],
+    with_batch: bool,
+) -> str:
+    """The five stages of :func:`_fit_to_budget`, on a payload already normalized."""
+    text = _dumps(payload)
+    if _fits(text, budget):
+        return text
+    rank = {item_id: position for position, item_id in enumerate(drop_order)}
+    rows: list[dict[str, Any]] = payload.get("items") or []
+    batch_doc = payload.get("accept_batch")
+    batch: list[dict[str, Any]] = (
+        batch_doc["items"]
+        if isinstance(batch_doc, dict) and isinstance(batch_doc.get("items"), list)
+        else []
+    )
+    # Victims in the order they go, oldest first; the response lists are then
+    # edited in place so their own order is untouched.
+    row_victims = sorted(rows, key=lambda row: rank.get(str(row.get("item_id", "")), -1))
+    batch_victims = sorted(batch, key=lambda entry: rank.get(str(entry.get("id", "")), -1))
+    payload["truncated"] = True
+    payload["truncation_hint"] = (
+        f"Response exceeded the {budget}-char budget; event tails were emptied, then "
+        "item rows dropped, then accept_batch entries dropped, oldest-created first, "
+        "until it fit (the newest item is always kept); an acceptance still too large "
+        "to fit is replaced by an {elided: true} marker, for which accept_eval.py "
+        "answers error (shrink it with an accept write); any other value or key still "
+        "too large is replaced by the same marker, largest first, and named by path in "
+        "elided_fields (a record nothing can bring under the budget collapses to an "
+        "empty envelope with unfittable=true). dropped_events_for / omitted_items / "
+        "omitted_accept_batch_for / elided_acceptance_for / elided_fields say what went. "
+        "Re-read with item_id=<id> for one item, since=<stamp> or state=<state> for a "
+        "slice, or compact=true."
+    )
+    text = _dumps(payload)
+    # Stages one to three drain their victims on MEASURED sizes: each unit's chars
+    # are measured once (raw, and redacted once the raw text fits), subtracted as it
+    # goes, and the payload is re-serialized only to confirm at a stage boundary. A
+    # re-dump per dropped unit ran the pure-Python indented encoder hundreds of times
+    # over a multi-megabyte board — on exactly the boards that need trimming.
+    dropped_events: list[str] = []
+
+    def _empty_tail(row: dict[str, Any], redacted: bool) -> tuple[int, int | None] | None:
+        events = row.get("events")
+        if not events:
+            return None
+        saved = _unit_chars(events, depth=3) - 2  # ``[]`` stays
+        saved_redacted = _unit_chars(events, depth=3, redacted=True) - 2 if redacted else None
+        row["events"] = []
+        dropped_events.append(str(row.get("item_id", "")))
+        payload["dropped_events_for"] = dropped_events
+        return saved, saved_redacted
+
+    text, fitted = _drain(payload, budget, text, row_victims, _empty_tail)
+    if fitted:
+        return text
+    omitted: list[str] = []
+
+    def _drop_row(row: dict[str, Any], redacted: bool) -> tuple[int, int | None] | None:
+        saved = _unit_chars(row, depth=2) + 6  # its own line prefix and separator go too
+        saved_redacted = _unit_chars(row, depth=2, redacted=True) + 6 if redacted else None
+        _remove_same(rows, row)
+        omitted.append(str(row.get("item_id", "")))
+        payload["omitted_items"] = omitted
+        return saved, saved_redacted
+
+    # Never the newest row: the victims are oldest first, so it is the last one.
+    text, fitted = _drain(payload, budget, text, row_victims[:-1], _drop_row)
+    if fitted:
+        return text
+    omitted_batch: list[str] = []
+
+    def _drop_entry(entry: dict[str, Any], redacted: bool) -> tuple[int, int | None] | None:
+        saved = _unit_chars(entry, depth=3) + 8
+        saved_redacted = _unit_chars(entry, depth=3, redacted=True) + 8 if redacted else None
+        _remove_same(batch, entry)
+        omitted_batch.append(str(entry.get("id", "")))
+        payload["omitted_accept_batch_for"] = omitted_batch
+        return saved, saved_redacted
+
+    text, fitted = _drain(payload, budget, text, batch_victims[:-1], _drop_entry)
+    if fitted:
+        return text
+    # The acceptance is the one field the store leaves effectively uncapped, and it
+    # stands in two places. Largest first, and only as many as it takes; on a tie
+    # the row's copy goes before the batch's, so the evaluator keeps a bar to run.
+    holders: list[tuple[dict[str, Any], str]] = [
+        (row, "acceptance") for row in rows if isinstance(row.get("acceptance"), dict)
+    ]
+    holders += [(entry, "accept") for entry in batch if isinstance(entry.get("accept"), dict)]
+    holders.sort(key=lambda holder: _serialized_chars(holder[0][holder[1]]), reverse=True)
+    elided: list[str] = []
+    for holder, name in holders:
+        if _fits(text, budget):
+            break
+        marker = _elision_marker(holder[name], _ELISION_REASON)
+        if _serialized_chars(holder[name]) <= len(_dumps(marker)):
+            # Bars are visited largest first, so from here on every one is smaller
+            # than the marker that would stand in for it: eliding it would grow the
+            # text, and what is still over budget is not an acceptance.
+            break
+        holder[name] = marker
+        item_id = str(holder.get("item_id") or holder.get("id") or "")
+        if item_id not in elided:
+            elided.append(item_id)
+        payload["elided_acceptance_for"] = elided
+        text = _dumps(payload)
+    # Whatever is left. The writers cap every remaining field, but a record grown
+    # by hand under the reader's ceiling still reads, and nothing above touches the
+    # header — so the largest string anywhere, value OR key, goes next, until the
+    # text fits or nothing larger than its marker remains. Ranked ONCE and drained
+    # on measured sizes like the first stages: a record can hold thousands of
+    # strings, and a re-walk plus a re-dump per elided one is minutes of work.
+    elided_fields: list[str] = []
+    renamed: dict[tuple[int, str], str] = {}
+
+    def _elide_leaf(leaf: _Leaf, redacted: bool) -> tuple[int, int | None] | None:
+        kind, container, key, chain = leaf
+        if kind == "key":
+            marker_key = _unique_key(container, f"[elided key: {len(key)} chars]")
+            holder = _render_path(chain, renamed)
+            path = f"{holder}.{marker_key}" if holder else marker_key
+            replacement: Any = marker_key
+            before, after = _serialized_chars(key), _serialized_chars(marker_key)
+        else:
+            # The value may by now sit under a renamed key.
+            key = renamed.get((id(container), key), key) if isinstance(container, dict) else key
+            path = _render_path(chain, renamed)
+            replacement = _elision_marker(container[key], _FIELD_ELISION_REASON)
+            before = _serialized_chars(container[key])
+            after = _unit_chars(replacement, depth=len(chain))
+        entry = len(json.dumps(path, ensure_ascii=False)) + 6  # its line in elided_fields
+        saved = before - after - entry
+        if saved <= 0:
+            # Eliding it would not shorten the text: its marker (and its line in
+            # ``elided_fields``) costs what it saves.
+            return None
+        saved_redacted: int | None = None
+        if redacted:
+            before_r = len(_delivered(json.dumps(container[key], ensure_ascii=False)))
+            after_r = len(_delivered(json.dumps(replacement, ensure_ascii=False)))
+            saved_redacted = before_r - after_r - entry
+        if kind == "key":
+            container[marker_key] = container.pop(key)
+            renamed[(id(container), key)] = marker_key
+        else:
+            container[key] = replacement
+        elided_fields.append(path)
+        payload["elided_fields"] = elided_fields
+        return saved, saved_redacted
+
+    text, fitted = _drain(payload, budget, text, _string_leaves(payload), _elide_leaf)
+    if fitted:
+        return text
+    # Nothing left to elide and still over: the record carries bulk that is neither
+    # a string value nor a key (numbers, nesting). The reply is then the smallest
+    # thing that is still true — every id, and why — which fits by construction.
+    return _dumps(
+        _unfittable_envelope(
+            payload,
+            budget,
+            original_ids,
+            with_batch,
+            why="the record carries bulk that is neither a string value nor a key",
+        )
+    )
+
+
+_V = TypeVar("_V")
+
+
+def _drain(
+    payload: dict[str, Any],
+    budget: int,
+    text: str,
+    victims: Sequence[_V],
+    remove: Callable[[_V, bool], tuple[int, int | None] | None],
+) -> tuple[str, bool]:
+    """Remove *victims* in order until *payload* fits as delivered, measuring each once.
+
+    ``remove(victim, redacted)`` takes the victim out of the payload and returns the
+    chars that removal saved — raw, and redacted when asked — or ``None`` when there
+    was nothing to remove. The estimates drive the loop; the payload is serialized
+    again only to CONFIRM, at which point the real size takes over: an estimate
+    that ran ahead (still over) continues the drain on the real text, one that fell
+    behind merely dropped a unit more than it had to. The redacted size is tracked
+    only once the raw text fits, since redacting a text far over budget is wasted.
+    Returns ``(text, fitted)``; ``fitted`` is False when the victims ran out first.
+    """
+    raw = len(text)
+    redacted: int | None = None
+    position = 0
+    while True:
+        while position < len(victims) and (
+            raw > budget or (redacted is not None and redacted > budget)
+        ):
+            saved = remove(victims[position], redacted is not None)
+            position += 1
+            if saved is None:
+                continue
+            raw -= saved[0]
+            if redacted is not None and saved[1] is not None:
+                redacted -= saved[1]
+        text = _dumps(payload)
+        raw = len(text)
+        if raw > budget:
+            if position >= len(victims):
+                return text, False
+            continue
+        redacted = len(_delivered(text))
+        if redacted <= budget:
+            return text, True
+        if position >= len(victims):
+            return text, False
+
+
+def _unit_chars(value: Any, *, depth: int, redacted: bool = False) -> int:
+    """The chars *value* occupies in the indented payload text, nested *depth*
+    levels down: its own indented dump, plus the extra indentation every line
+    after the first carries at that depth. ``redacted`` measures the delivered form
+    (:func:`_delivered`). An estimate the drain confirms, never a promise."""
+    text = json.dumps(value, indent=2, ensure_ascii=False)
+    if redacted:
+        text = _delivered(text)
+    return len(text) + text.count("\n") * 2 * depth
+
+
+def _delivered(text: str) -> str:
+    """*text* in the exact form the model receives from the ``work_ledger_read`` tool.
+
+    The tool layer redacts the serialized reply and then frames it through the
+    response sanitizer (``build_tool_response``), which NFC-normalizes the text,
+    strips hidden characters and cuts it at :data:`validation.MAX_RESPONSE_LEN`.
+    Both passes can change the length, and one of them can GROW it: a short
+    credential-bearing link becomes a ``[REDACTED: …]`` placeholder several times
+    its size, and a character that NFC decomposes — one from the Unicode
+    composition exclusions, which a hand-edited store file can hold — becomes two
+    or three. A reply fitted on its raw length alone could therefore leave here
+    under the budget and reach the runtime's cut anyway, torn mid-document. Both
+    passes are idempotent (a placeholder is not itself a match; NFC is stable), so
+    the size measured here is the size delivered.
+    """
+    return sanitize_string(redact_via_context(text))
+
+
+def _fits(text: str, budget: int) -> bool:
+    """Whether *text* fits *budget* both as serialized and AS DELIVERED.
+
+    The raw length is checked first because it is cheap and a delivery pass on
+    text far over budget is wasted; only a raw text that fits is put through
+    :func:`_delivered` to prove the delivered one does too.
+    """
+    return len(text) <= budget and len(_delivered(text)) <= budget
+
+
+def _unfittable_envelope(
+    payload: dict[str, Any],
+    budget: int,
+    item_ids: Sequence[str],
+    with_batch: bool,
+    *,
+    why: str,
+) -> dict[str, Any]:
+    """The reply when no trim can bring the record under *budget*: valid, small,
+    and honest about what it is not showing.
+
+    Bounded by construction AND measured: the conductor's own key (only when it is
+    a string of ordinary length), the markers, a hint that names the remedy, the
+    count of items the board held, and as many of their ids (only the ones shaped
+    like one) as fit — a hand-grown board can hold thousands of readable item
+    files, so the list is halved until the envelope fits as delivered. Nothing in
+    it can carry the bulk that defeated the trim.
+    """
+    conductor = payload.get("conductor")
+    slot_key = conductor.get("slot_key") if isinstance(conductor, dict) else None
+    header: dict[str, Any] = {}
+    if isinstance(slot_key, str) and len(slot_key) <= 512:
+        header["slot_key"] = slot_key
+    envelope: dict[str, Any] = {"conductor": header, "items": []}
+    if with_batch:
+        envelope["accept_batch"] = {"items": []}
+    envelope["truncated"] = True
+    envelope["unfittable"] = True
+    envelope["truncation_hint"] = (
+        f"The reply could not be brought under the {budget}-char budget even with every "
+        f"oversized value and key elided: {why}, so every item is omitted here "
+        "(omitted_count says how many; omitted_items lists as many ids as fit). Recover "
+        "the status columns with compact=true&item_id=<id>, which carries no accept_batch "
+        "— the batch is always the whole board, so a full read of one item still carries "
+        "the sibling that cannot fit. Repair the record before a full re-read: an accept "
+        "write with a smaller acceptance, or work_ledger_rebuild, which rewrites it from "
+        "the crew log."
+    )
+    ids = [item_id for item_id in item_ids if len(item_id) <= 64]
+    envelope["omitted_count"] = len(item_ids)
+    envelope["omitted_items"] = ids
+    while ids and not _fits(_dumps(envelope), budget):
+        ids = ids[: len(ids) // 2]
+        envelope["omitted_items"] = ids
+    return envelope
+
+
+def _unique_key(container: dict[str, Any], wanted: str) -> str:
+    """*wanted*, suffixed (``#2``, ``#3``, …) until it names no existing key of
+    *container* — inside the closing bracket for a ``[...]`` marker key."""
+    candidate = wanted
+    suffix = 2
+    while candidate in container:
+        candidate = f"{wanted[:-1]} #{suffix}]" if wanted.endswith("]") else f"{wanted} #{suffix}"
+        suffix += 1
+    return candidate
+
+
+#: Every code point Python can hold that no UTF-8 encoder accepts: a lone
+#: surrogate, which ``json.loads`` produces from the escape ``"\ud800"`` and a
+#: hand-edited record can therefore carry.
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _without_lone_surrogates(payload: dict[str, Any]) -> None:
+    """Replace every lone surrogate in *payload*'s strings — values AND keys — with
+    U+FFFD, in place and iteratively.
+
+    Done on the object, not on the serialized text: a text-level replacement would
+    rewrite two keys that differ only there to the same key, and the reader's
+    ``json.loads`` then keeps one and silently drops the other. Here a key whose
+    replacement collides is suffixed instead, so no field is lost. The walk is
+    iterative for the same reason the leaf walk is: the record can be as deep as
+    JSON allowed it to be.
+
+    Replaced, not preserved, on purpose. A lone surrogate is representable nowhere
+    downstream: aiohttp's UTF-8 encoding of the response raises on it, so does the
+    tool server's stdout, and the client's JSON parser rejects a lone-surrogate
+    escape — so "keep it as an escaped code unit" is not a path to the reader, it
+    is a failed read at a later hop. U+FFFD is the replacement character's whole
+    meaning ("something undecodable stood here"); a value that already reads
+    U+FFFD and one that read a surrogate are delivered alike, which loses nothing a
+    reader could have used, since the original could never have been delivered.
+    """
+    stack: list[Any] = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key in list(node.keys()):
+                value = node[key]
+                if isinstance(value, str):
+                    if _LONE_SURROGATE_RE.search(value):
+                        node[key] = _LONE_SURROGATE_RE.sub("\ufffd", value)
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+                if isinstance(key, str) and _LONE_SURROGATE_RE.search(key):
+                    node[_unique_key(node, _LONE_SURROGATE_RE.sub("\ufffd", key))] = node.pop(key)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                if isinstance(value, str):
+                    if _LONE_SURROGATE_RE.search(value):
+                        node[index] = _LONE_SURROGATE_RE.sub("\ufffd", value)
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+
+
+def _elision_marker(value: Any, reason: str) -> dict[str, Any]:
+    """What stands in for an elided value: that it was elided, how large it was
+    (compact-JSON chars, the store's own measure), and what to do about it."""
+    return {"elided": True, "chars": _serialized_chars(value), "reason": reason}
+
+
+#: Top-level keys this function writes itself. Never elided: they are what tells
+#: the reader what went, and they are bounded by construction (ids and one hint).
+_TRIM_MARKER_KEYS = frozenset(
+    {
+        "truncated",
+        "truncation_hint",
+        "unfittable",
+        "dropped_events_for",
+        "omitted_items",
+        "omitted_accept_batch_for",
+        "elided_acceptance_for",
+        "elided_fields",
+    }
+)
+
+
+#: A string leaf nominated for the fifth stage: ``(kind, container, key, chain)``
+#: with ``kind`` ``"value"`` or ``"key"``, ``container`` the dict or list that holds
+#: it, ``key`` its key or index (for a key: the key itself) and ``chain`` the
+#: ``(container, key)`` pairs from the root to it — to the holding dict, for a key.
+_Leaf = tuple[str, Any, Any, tuple[tuple[Any, Any], ...]]
+
+
+def _string_leaves(payload: dict[str, Any]) -> list[_Leaf]:
+    """Every string in *payload*, value or KEY, largest first by serialized size.
+
+    Walks dicts and lists iteratively (a record can be as deep as JSON allowed it to
+    be, and this must not be the frame that overflows), skipping the trim's own
+    top-level keys and every marker already emitted (a dict with ``elided: true``,
+    whose ``reason`` is itself a string; a marker key, which starts with
+    ``[elided key:``). Keys count because a hand-edited record can carry its bulk
+    in one, and a trim that only saw values would leave it standing. "Largest" is by
+    what the string COSTS serialized, not by its Python length: a run of control
+    characters is six JSON chars each, and a walk that measured ``len`` would leave
+    the real bulk standing. A leaf carries its chain rather than a rendered path
+    because a key above it may be renamed before its turn comes; :func:`_render_path`
+    reads the chain against the renames made so far.
+    """
+    ranked: list[tuple[int, _Leaf]] = []
+    stack: list[tuple[Any, tuple[tuple[Any, Any], ...]]] = [(payload, ())]
+    while stack:
+        node, chain = stack.pop()
+        if isinstance(node, dict):
+            if node.get("elided") is True:
+                continue
+            for key, value in node.items():
+                if not chain and key in _TRIM_MARKER_KEYS:
+                    continue
+                # A top-level key is the reply's own schema (``conductor``, ``items``),
+                # never record bulk; nested keys are the record's and may be.
+                if chain and isinstance(key, str) and not key.startswith("[elided key:"):
+                    ranked.append((_serialized_chars(key), ("key", node, key, chain)))
+                if isinstance(value, str):
+                    ranked.append(
+                        (_serialized_chars(value), ("value", node, key, chain + ((node, key),)))
+                    )
+                elif isinstance(value, (dict, list)):
+                    stack.append((value, chain + ((node, key),)))
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                if isinstance(value, str):
+                    ranked.append(
+                        (_serialized_chars(value), ("value", node, index, chain + ((node, index),)))
+                    )
+                elif isinstance(value, (dict, list)):
+                    stack.append((value, chain + ((node, index),)))
+    ranked.sort(key=lambda entry: entry[0], reverse=True)
+    return [leaf for _size, leaf in ranked]
+
+
+def _render_path(chain: tuple[tuple[Any, Any], ...], renamed: dict[tuple[int, str], str]) -> str:
+    """The JSON-ish path a *chain* spells — ``conductor.goal``,
+    ``items[0].artifacts.evidence`` — with every key read through *renamed*, so a
+    path under a key the trim has already renamed names the marker key, not the
+    bulk that is gone."""
+    path = ""
+    for container, key in chain:
+        if isinstance(container, list):
+            path += f"[{key}]"
+            continue
+        name = renamed.get((id(container), key), key) if isinstance(key, str) else key
+        path = f"{path}.{name}" if path else str(name)
+    return path
+
+
+def _remove_same(entries: list[dict[str, Any]], victim: dict[str, Any]) -> None:
+    """Remove *victim* from *entries* by identity, wherever it sits.
+
+    ``list.remove`` compares by equality, and two rows are never equal — but an
+    equality walk over a 500 KB acceptance is not the way to find a dict this
+    function already holds a reference to.
+    """
+    for position, entry in enumerate(entries):
+        if entry is victim:
+            del entries[position]
+            return
+
+
+def _serialized_chars(document: Any) -> int:
+    """The length of *document* as compact JSON — the measure the store's own
+    acceptance cap uses, so the marker's ``chars`` reads against that cap."""
+    return len(json.dumps(document, ensure_ascii=False))
+
+
+def _dumps(payload: dict[str, Any]) -> str:
+    """The serialization the tool layer applies to what this route returns. The
+    payload has had its lone surrogates replaced first (:func:`_without_lone_surrogates`),
+    so the text is what every UTF-8 encoder downstream accepts."""
+    return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 def _tail_events(key: str, item_id: str, limit: int) -> list[work_ledger.WorkEvent]:

@@ -65,7 +65,7 @@ def test_the_doc_pins_the_four_worker_statuses(doc_text: str) -> None:
     """
     from kiro_crew.work_ledger import WORKER_STATUSES
 
-    table = doc_text.split("## `work_report`", 1)[1].split("## Why `done` is a claim", 1)[0]
+    table = doc_text.split("## `work_report`", 1)[1].split("\n## ", 1)[0]
     rows = {line.split("|")[1].strip() for line in table.splitlines() if line.startswith("| `")} - {
         "`status`"
     }  # the table header, whose first cell names the field
