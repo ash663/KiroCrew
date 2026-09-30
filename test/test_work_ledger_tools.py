@@ -1528,6 +1528,39 @@ async def test_read_filters_by_since_on_created_reported_and_closed(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_read_since_the_beginning_of_time_returns_the_whole_board(monkeypatch):
+    """``since=0001-01-01T00:00:00`` is how a caller spells "everything", and
+    ``9999-12-31T23:59:59`` "nothing". Neither may be a 400, and neither may be a
+    500: shifting an extreme naive stamp into the local zone can run off the
+    calendar, which the platform reports as ``ValueError`` / ``OverflowError``, and
+    the read must answer through that. The overflow is also FORCED below, since
+    which end trips depends on the host's zone."""
+    ids = await _three_dated_items(monkeypatch)
+    status, body = await _read_with(CONDUCTOR_A, "since=0001-01-01T00:00:00")
+    assert status == 200, body
+    assert {r["item_id"] for r in body["items"]} == set(ids) and len(body["items"]) == 3
+    status, body = await _read_with(CONDUCTOR_A, "since=9999-12-31T23:59:59")
+    assert status == 200, body
+    assert body["items"] == []
+
+    class _Unshiftable(datetime):
+        def astimezone(self, tz=None):  # type: ignore[override]
+            raise OverflowError("date value out of range")
+
+    real_parse = wl._parse_iso
+    monkeypatch.setattr(
+        wl,
+        "_parse_iso",
+        lambda value: (
+            _Unshiftable(1, 1, 1) if value == "0001-01-01T00:00:00" else real_parse(value)
+        ),
+    )
+    status, body = await _read_with(CONDUCTOR_A, "since=0001-01-01T00:00:00")
+    assert status == 200, body
+    assert {r["item_id"] for r in body["items"]} == set(ids) and len(body["items"]) == 3
+
+
+@pytest.mark.asyncio
 async def test_read_filters_compose_and_leave_the_batch_whole(monkeypatch):
     ids = await _three_dated_items(monkeypatch)
     status, body = await _record(
@@ -2519,6 +2552,48 @@ def test_fit_to_budget_elides_many_leaves_largest_first_and_fits():
     assert body["items"][0]["artifacts"]["tiny"] == "x", "a small leaf is never worth eliding"
     assert all(path.startswith("items[0].artifacts.big_") for path in body["elided_fields"])
     assert 0 < len(body["elided_fields"]) <= 40
+
+
+@pytest.mark.asyncio
+async def test_read_of_an_item_nested_too_deep_for_the_parser_answers(monkeypatch):
+    """A 20 KB item file of ten thousand nested arrays is under the reader's ceiling
+    and raises ``RecursionError`` from inside ``json.loads`` — before any fit. The
+    store reads it as content it cannot trust, the same as a torn file, so the read
+    answers 200 with the rest of the board; an event line nested as deep, or holding
+    an integer past the interpreter's digit limit (a bare ``ValueError``), is skipped
+    like a torn line and costs none of its neighbours."""
+    ids = await _three_dated_items(monkeypatch)
+    wl.item_path(CONDUCTOR_A, ids[0]).write_text("[" * 10_000 + "]" * 10_000, encoding="utf-8")
+    events_path = wl.item_events_path(CONDUCTOR_A, ids[1])
+    kept = events_path.read_text(encoding="utf-8")
+    events_path.write_text(
+        "[" * 10_000 + "]" * 10_000 + "\n" + "1" * 5_000 + "\n" + kept, encoding="utf-8"
+    )
+    resp = await routes.api_work_ledger_get(_req("GET", "/api/work-ledger", sk=CONDUCTOR_A))
+    assert resp.status == 200
+    body = json.loads(resp.text)
+    assert [r["item_id"] for r in body["items"]] == ids[1:], "the unreadable item is absent"
+    second = body["items"][0]
+    assert second["events"], "the readable event lines survive the unreadable one"
+
+
+@pytest.mark.asyncio
+async def test_read_of_an_open_item_with_a_year_one_stamp_answers(monkeypatch):
+    """An open, bound item whose hand-edited ``created_at`` is ``0001-01-01T00:00:00``
+    reaches ``is_stale`` before the fit; shifting that stamp into the local zone runs
+    off the calendar. It reads as UTC instead, so the read answers 200 and the item
+    is stale (year one is long past the window), never a 500."""
+    ids = await two_by_two()
+    item_path = wl.item_path(CONDUCTOR_A, ids["item_a"])
+    stored = json.loads(item_path.read_text(encoding="utf-8"))
+    stored["created_at"] = "0001-01-01T00:00:00"
+    stored["last_report_at"] = None
+    item_path.write_text(json.dumps(stored), encoding="utf-8")
+    resp = await routes.api_work_ledger_get(_req("GET", "/api/work-ledger", sk=CONDUCTOR_A))
+    assert resp.status == 200
+    row = next(r for r in json.loads(resp.text)["items"] if r["item_id"] == ids["item_a"])
+    assert row["stale"] is True
+    assert row["created_at"] == "0001-01-01T00:00:00"
 
 
 def test_the_schema_ceiling_restates_the_route_caps():
