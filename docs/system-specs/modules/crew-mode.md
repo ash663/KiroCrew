@@ -869,9 +869,12 @@ first input to the one selection gate, `members.select_provider_backend`: the
 crew's pin, then the member-DM route (`agent.member_acp_backend`), then
 `agent.acp_backend`. The pin goes through `resolve_selected_backend`, so an
 unknown or policy-denied value runs the session on kiro-cli with the gate's
-usual warning rather than falling through to a route (harness-parity H3). `""`
-is the default and is also kiro-cli's id, so a crew cannot pin kiro-cli over a
-non-kiro default.
+usual warning rather than falling through to a route (harness-parity H3). Null
+inherits the session default; an empty string selects kiro-cli explicitly. So the
+field is nullable (default `null`): `""` is kiro-cli's own id, and a crew that
+must stay on kiro-cli under a non-kiro member route or default pins `""`. A
+full-document save writes `null` for every crew that pins nothing, so saving
+pins no crew to kiro-cli.
 
 The crew is the `resolve_crew_identity` answer the provider factory already
 uses for effort, so the pin reaches every session that runs AS that crew: its DM
@@ -887,16 +890,23 @@ the crew record, not in an agent spec, so kiro-cli never reads it and the
 nor clears it; a crew bound to that template pins its own.
 
 Everything that must name the backend a session will get asks the same gate
-with the same pin: the warm pool bypasses a pinned crew (`bypass_backend`), the
+with the same pin: the warm pool bypasses a pinned crew (`bypass_backend`, and
+also when it cannot read the config, since the factory may hold a pin it cannot
+see; pooled children are built as the pool agent's crew but never on its pin),
+the
 dashboard's cold-slot capabilities and `set_model` resolve the slot's crew
 through `session_crew_acp_backend`, the member operating-mode block checks the
-pinned engine's dispatch capability, and a `config.json` change to a pin
-rebuilds the provider factory (`SessionManager._crew_backend_pin_changed`).
+pinned engine's dispatch capability, the crews API judges a crew's `model`
+pin against the pinned harness's catalog (`_pin_entitlement_backend`), and a
+`config.json` change to a pin rebuilds the provider factory
+(`SessionManager._crew_backend_pin_changed`, which matches the changed pin
+path rather than comparing values, so a deferred and redelivered edit still
+lands).
 
 The loader is defensive about hand-edited config: a non-string `model` or
 `triggers` collapses to `""`, an unknown `reasoning_effort` collapses to inherit,
-a non-string `acp_backend` collapses to inherit (an unselectable string is kept,
-so the gate can refuse it with its reason), and a junk watchdog override
+a non-string `acp_backend` collapses to inherit (`null`; an unselectable string
+is kept, so the gate can refuse it with its reason), and a junk watchdog override
 collapses to `0`.
 
 ### Crewmate conversation layout: switcher, Profile, Dashboard, Files

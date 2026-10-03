@@ -570,6 +570,58 @@ def test_a_target_linked_during_the_idle_check_is_refused(tmp_path, monkeypatch)
     assert target._pending_model_pick is None
 
 
+@pytest.mark.parametrize("moved", ["agent", "agent_kind", "project", "session_key"])
+def test_a_target_whose_identity_moves_during_the_check_is_refused(tmp_path, monkeypatch, moved):
+    """The backend the model was checked against keys on the slot's agent and
+    project (its crew pin) and its session key; a switch landing during the
+    awaited sub-agent probe makes that check stale, so nothing is stored."""
+    from kiro_crew.dashboard import chat_handlers
+
+    state = _make_state(tmp_path)
+    caller = state.get_or_create_slot("chat-1")
+    target = state.get_or_create_slot("chat-2")
+    real_key = sc.effective_session_key
+
+    async def _switch_meanwhile(*_a, **_kw):
+        if moved == "agent":
+            target.agent = "another-crew"
+        elif moved == "agent_kind":
+            target.agent_kind = "template" if target.agent_kind != "template" else "member"
+        elif moved == "project":
+            target.project = str(tmp_path / "elsewhere")
+        else:
+            monkeypatch.setattr(sc, "effective_session_key", lambda s: real_key(s) + "-moved")
+        return None
+
+    monkeypatch.setattr(chat_handlers, "_subagents_attached_response", _switch_meanwhile)
+
+    with pytest.raises(sc.SessionControlError) as exc:
+        _set_model(state, caller, "chat-2", "sonnet")
+
+    assert exc.value.code == "target_replaced"
+    assert exc.value.status == 409
+    assert target._pending_model_pick is None
+
+
+def test_an_unmoved_target_still_stores_the_pick(tmp_path, monkeypatch):
+    """Control for the identity re-check: the same probe returning with nothing
+    changed leaves the pick stored exactly as before."""
+    from kiro_crew.dashboard import chat_handlers
+
+    state = _make_state(tmp_path)
+    caller = state.get_or_create_slot("chat-1")
+    target = state.get_or_create_slot("chat-2")
+
+    async def _nothing_moves(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(chat_handlers, "_subagents_attached_response", _nothing_moves)
+
+    out = _set_model(state, caller, "chat-2", "sonnet")
+    assert out["pending"] is True
+    assert target._pending_model_pick is not None
+
+
 def test_auto_jev_is_owner_only(tmp_path):
     from kiro_crew.dashboard.chat_handlers import JEV_ROUTE_MODEL
 

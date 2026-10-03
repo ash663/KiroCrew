@@ -157,9 +157,10 @@ any value from the table, for example
 session that runs as that crewmate — its DM thread, its schedules, channel
 turns and `spawn_run(crew=...)` delegates — and outranks both
 `agent.member_acp_backend` and `agent.acp_backend`. A session started from an
-agent template runs as no crewmate and keeps those two. Empty (the default)
-inherits them. A value this build cannot select runs the session on kiro-cli
-and logs why.
+agent template runs as no crewmate and keeps those two. Null (the default)
+inherits the session default; an empty string selects kiro-cli explicitly, which
+keeps one crewmate on kiro-cli when the defaults name another harness. A value
+this build cannot select runs the session on kiro-cli and logs why.
 
 ## Key Settings
 

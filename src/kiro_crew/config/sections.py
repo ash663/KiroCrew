@@ -3211,19 +3211,20 @@ class KiroCrewAgentConfig:
             "is ignored, exactly as the global default is.",
         ),
     )
-    acp_backend: str = field(
-        default="",
+    # Nullable because kiro-cli's own backend id is "": with a str default, "pin
+    # kiro-cli" and "pin nothing" were the same value, so a crew could not stay on
+    # kiro-cli under a non-kiro default. None is the inherit value, so a full-
+    # document save writes null for every crew that pins nothing and no record is
+    # pinned to kiro-cli by being saved. Values are spelled as agent.acp_backend
+    # (e.g. "kas", "claude"); an unselectable one runs the session on kiro-cli with
+    # the gate's warning. No enum, for AgentConfig.acp_backend's reason: the live
+    # selectable set comes from the registry, never a frozen literal (H4).
+    acp_backend: str | None = field(
+        default=None,
         metadata=_meta(
-            "ACP Backend",
-            "Which ACP agent runs sessions on this crew, spelled as agent.acp_backend "
-            "(e.g. 'kas', 'claude', 'deepseek'). Empty inherits: this crew's member DM "
-            "thread follows agent.member_acp_backend and every other session follows "
-            "agent.acp_backend. A value this build cannot select (unknown, or denied "
-            "by policy) runs the session on kiro-cli and logs why. kiro-cli's own id "
-            "is the empty value, so it cannot be pinned here over a non-kiro default.",
-            # Same no-enum reasoning as AgentConfig.acp_backend: the live selectable
-            # set comes from the registry via resolve_selected_backend, never a
-            # frozen literal (harness-parity H4).
+            "Crew ACP backend",
+            "Backend for this member's conversations and tasks. Null inherits the "
+            "session default; an empty string selects kiro-cli explicitly.",
         ),
     )
     display_name: str = field(

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from kiro_crew.agent_spec_format import iter_agent_spec_files
+from kiro_crew.config.resolution import DEGRADED_WHOLE_CONFIG
 from kiro_crew.kiro_prerequisite import pre_spawn_identity, spawn_pid, stamp_spawn_identity
 from kiro_crew.messaging.queue_drain import entry_channel, wake_other_drains
 from kiro_crew.metrics.sessions import (
@@ -1945,24 +1946,33 @@ class SessionAllocationService:
     async def _crew_pins_backend(self, agent: str | None, crew_agent: object) -> bool:
         """True when the crew this session runs as pins its own ACP backend.
 
-        The backend twin of :meth:`_crew_pins_effort`, with the same off-loop read,
-        the same narrowing of the untyped ``crew_agent`` and the same failure
-        answer (False, the pre-field behaviour). It asks only whether a pin is SET,
+        The backend twin of :meth:`_crew_pins_effort`, with the same off-loop read
+        and the same narrowing of the untyped ``crew_agent``, but the OPPOSITE
+        failure answer: an unreadable config, or a torn one the loader filled with
+        defaults (``DEGRADED_WHOLE_CONFIG``), answers True. A wrong False serves a
+        pooled child spawned on the default backend, so a pinned crew's prompt goes
+        to a harness it did not pin, while the provider factory still holds the
+        pin; a wrong True only costs a cold start. Effort can afford False because
+        a wrong effort changes how long a session thinks, not where its prompt
+        goes. It asks only whether a pin is SET,
         not whether it is selectable: a refused pin still routes the session
         through the factory's gate, which is where the refusal is logged and
-        degraded, so it must not be served from the pool either.
+        degraded, so it must not be served from the pool either. A ``""`` pin
+        (kiro-cli) is set too: the pool's default backend need not be kiro-cli.
         """
         try:
             config = await asyncio.to_thread(self._deps.load_config)
+            if DEGRADED_WHOLE_CONFIG in config.degraded_sections:
+                return True
             crew = crew_agent if isinstance(crew_agent, str) else None
-            return bool(config.crew_acp_backend(agent, crew))
+            return config.crew_acp_backend(agent, crew) is not None
         except Exception:
             self._deps.logger.warning(
-                "Could not read the crew backend pin for agent=%r; pooling as before",
+                "Could not read the crew backend pin for agent=%r; cold-starting",
                 agent,
                 exc_info=True,
             )
-            return False
+            return True
 
     def _dispatch_hard_kill(self, provider: LLMProvider) -> None:
         """Dispatch blocking provider teardown away from the event-loop thread."""

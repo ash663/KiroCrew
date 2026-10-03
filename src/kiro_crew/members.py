@@ -34,7 +34,7 @@ from kiro_crew import platform_compat
 from kiro_crew.artifacts import slugify
 from kiro_crew.atomic_write import atomic_write, fsync_dir, read_bytes_with_retry
 from kiro_crew.config.paths import data_home
-from kiro_crew.external_text import external_text_requires_redaction
+from kiro_crew.external_text import external_text_requires_redaction, redact_external_text
 from kiro_crew.mcp_gateway.claim import STUB_SESSION_TOKEN_ENV
 from kiro_crew.pinned_fs import (
     PinnedPathRefusal,
@@ -147,15 +147,19 @@ def select_provider_backend(
     session_key: str | None,
     member_backend: str,
     configured_default: str,
-    crew_backend: str = "",
+    crew_backend: str | None = None,
 ) -> str:
     """The per-session half of the ONE backend-selection gate (H3/H13).
 
     Precedence: the crew's own pin, then the member-DM auto-route, then the
     configured default. ``crew_backend`` is the RAW ``agents.<name>.acp_backend``
-    of the crew the session runs as (``KiroCrewConfig.crew_acp_backend``); ``""``
-    means that crew pins nothing, which leaves the two routes below exactly as
-    they were before the pin existed.
+    of the crew the session runs as (``KiroCrewConfig.crew_acp_backend``). ``None``
+    means that crew pins nothing (or the session runs as no crew), which leaves
+    the two routes below exactly as they were before the pin existed. ``""`` is
+    a pin like any other, of kiro-cli's own id: it is the only way to keep one
+    crew on kiro-cli under a non-kiro member route or default, which is why the
+    test is ``is not None`` and not truthiness (the field's contract: null
+    inherits, an empty string selects kiro-cli explicitly).
 
     Both pinned arms go through :func:`resolve_selected_backend` — the same
     governance/selectability gate the persisted field crosses, so a denied or
@@ -172,17 +176,23 @@ def select_provider_backend(
     """
     from kiro_crew.acp_backends import resolve_selected_backend
 
-    if crew_backend:
-        backend = resolve_selected_backend(crew_backend)
+    if crew_backend is not None:
+        # The pin is kept raw at load, so it can hold any agent-written text, and
+        # both this line and the resolver's refusal warning log it. A registered
+        # backend id carries no credential shape, so redacting first changes no
+        # selection, only what an unselectable pin prints.
+        pin = redact_external_text(crew_backend)
+        # The gate is handed the pin, not the crew, so the key is named generically.
+        backend = resolve_selected_backend(pin, setting="agents.<name>.acp_backend")
         logger.info(
             "session %s: routing to acp_backend=%r (crew acp_backend=%r)",
             session_key,
             backend,
-            crew_backend,
+            pin,
         )
         return backend
     if is_member_session_key(session_key):
-        backend = resolve_selected_backend(member_backend)
+        backend = resolve_selected_backend(member_backend, setting="agent.member_acp_backend")
         logger.info(
             "member session %s: routing to acp_backend=%r " "(agent.member_acp_backend=%r)",
             session_key,

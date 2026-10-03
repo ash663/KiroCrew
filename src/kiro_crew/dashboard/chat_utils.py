@@ -946,8 +946,8 @@ def effective_session_key(slot: _ChatSlot) -> str:
 
 def session_crew_acp_backend(
     config, session_key: str, agent_name: str | None, project_dir: str | None = None
-) -> str:
-    """The ``acp_backend`` pin of the crew a session on this selection runs as, or ``""``.
+) -> str | None:
+    """The ``acp_backend`` pin of the crew a session on this selection runs as, or ``None``.
 
     For the dashboard's READERS of the backend-selection gate (cold-slot
     capabilities, ``set_model``), which must name the backend the provider factory
@@ -957,7 +957,7 @@ def session_crew_acp_backend(
     supplies defaults and not a member identity.
 
     Blocking (the resolver reads the session's execution record), so callers run
-    it off the event loop. Any failure answers ``""``, the pre-pin route: a readout
+    it off the event loop. Any failure answers ``None``, the pre-pin route: a readout
     must not fail because a selection could not be resolved, and the turn path
     reports that failure itself.
     """
@@ -971,7 +971,7 @@ def session_crew_acp_backend(
             resolve_agent_bindings, config, session_key, agent_name, project_dir
         )
     except Exception:  # noqa: BLE001 - includes StopIteration; see docstring
-        return ""
+        return None
     crew = "" if bindings.selection_kind == "template" else bindings.resolved_alias
     return config.crew_acp_backend(None, crew)
 

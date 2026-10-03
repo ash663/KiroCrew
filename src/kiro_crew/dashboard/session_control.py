@@ -4755,6 +4755,9 @@ async def set_model_target(
     # and gate re-checks below, which already cover a turn or a replacement
     # landing during an await.
     target_session_key = effective_session_key(slot)
+    # The crew pin keys on the slot's agent, its kind and project, which an agent
+    # switch can move during the awaits below; the store re-checks them all.
+    checked_identity = (target_session_key, slot.agent, slot.agent_kind, slot.project)
     crew_backend = (
         await asyncio.to_thread(
             session_crew_acp_backend,
@@ -4764,7 +4767,7 @@ async def set_model_target(
             slot.project or None,
         )
         if cfg is not None
-        else ""
+        else None
     )
     backend = select_provider_backend(
         target_session_key, member_backend, default_backend, crew_backend=crew_backend
@@ -4825,6 +4828,14 @@ async def set_model_target(
         if live is not slot:
             raise SessionControlError(
                 "the target session was replaced; model not changed",
+                code="target_replaced",
+                status=409,
+            )
+        current_identity = (effective_session_key(slot), slot.agent, slot.agent_kind, slot.project)
+        if current_identity != checked_identity:
+            raise SessionControlError(
+                "the target session's agent, its kind, project or link changed while "
+                "the model was being checked; model not changed",
                 code="target_replaced",
                 status=409,
             )
