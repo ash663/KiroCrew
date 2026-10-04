@@ -1398,6 +1398,27 @@ class TestSharedPermissionSurface:
         assert sp._LIVE[os.fspath(path)] == owner._seed_owner
         assert owner._claude_settings_authored is True
 
+    def test_a_model_pinned_sibling_shares_a_modelless_seed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(_SERVED)})
+        owner = _client(tmp_path)
+        owner._write_claude_local_settings()
+        assert "model" not in _seed(tmp_path)
+
+        sibling = _client(tmp_path, model=_SERVED[0])
+        assert "model" in json.loads(sibling._render_claude_settings_payload())
+        sibling._write_claude_local_settings()
+
+        assert sibling._claude_settings_shared is True
+        assert sibling._permission_surface_governed is True
+        stub = {"name": "kirocrew-core", "command": "/stub", "args": [], "env": [], "type": "stdio"}
+        projection = acp_client.mirror_for(ACP_BACKEND_CLAUDE).session_projection(
+            sibling._agent,
+            stub_server_names=("kirocrew-core",),
+            stub_elements=[stub],
+            permission_surface_owned=sibling._permission_surface_governed,
+        )
+        assert projection.params["mcpServers"] != []
+
     def test_failed_revalidation_clears_governed_but_keeps_lease(self, tmp_path, monkeypatch):
         client = _client(tmp_path)
         path = _settings(tmp_path)

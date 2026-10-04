@@ -5561,6 +5561,20 @@ class AcpClient:
         )
         return True
 
+    def _share_settings_seed_ignoring_model(self, local_settings: Path, payload: str) -> bool:
+        """:meth:`_share_settings_seed_if_identical`, retried without *payload*'s ``model`` key.
+
+        ``model`` grants no permission and :meth:`_apply_startup_model` sets it
+        live, so a sibling seed that differs only there still governs this session.
+        """
+        if self._share_settings_seed_if_identical(local_settings, payload):
+            return True
+        settings = json.loads(payload)
+        if settings.pop("model", None) is None:
+            return False
+        modelless_payload = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+        return self._share_settings_seed_if_identical(local_settings, modelless_payload)
+
     @staticmethod
     def _rename_aside_noreplace(aside: Path, path: Path) -> bool:
         """Move *aside* back to an ABSENT *path* as the entry it is; ``False`` with no primitive.
@@ -6247,7 +6261,7 @@ class AcpClient:
                 # byte-identical to what this session would have written, the surface
                 # already governs this session and is shared rather than refused --
                 # without a write, a claim, or any right to remove it later.
-                shared = self._share_settings_seed_if_identical(local_settings, payload)
+                shared = self._share_settings_seed_ignoring_model(local_settings, payload)
                 self._invalidate_session_mcp_projection()
                 if shared:
                     return
@@ -6466,7 +6480,7 @@ class AcpClient:
                     deadline = time.monotonic() + 2.0
                     while True:
                         settled = seed_provenance.recorded_durable(local_settings) == want
-                        if self._share_settings_seed_if_identical(local_settings, payload):
+                        if self._share_settings_seed_ignoring_model(local_settings, payload):
                             self._invalidate_session_mcp_projection()
                             return
                         if settled or time.monotonic() >= deadline:
