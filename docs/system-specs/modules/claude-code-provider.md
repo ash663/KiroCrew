@@ -304,27 +304,35 @@ one shielded worker-thread transaction. If revocation or deletion cannot complet
 the old seed is restored or re-recorded so a later session can repair it rather
 than leaving an unowned permission mode on disk.
 
-**One relaxation: a byte-identical sibling seed is SHARED, not refused.** Two
-sessions of the same agent in the same `work_dir` render the same payload, and
-refusing the second one bought nothing — it ran with the whole `mcpServers` array
+**One relaxation: a sibling seed that governs this session is SHARED, not refused.**
+Two sessions of the same agent in the same `work_dir` render the same permissions,
+and refusing the second one bought nothing — it ran with the whole `mcpServers` array
 withheld, so only one session per project directory ever had Crew's tools
 (`spawn_run`, `cron_*`, `session_checkpoint`). When the file on disk is a live
-sibling's seed whose bytes equal BOTH Crew's durable record
-(`seed_provenance.share`, checked ignoring the live holder) AND the exact
-payload this client would have written, the client takes a shared-reader state
+sibling's seed whose bytes are the ones Crew's durable record names
+(`seed_provenance.share`, checked ignoring the live holder) and that carries this
+session's permission keys, the client takes a shared-reader state
 (`_claude_settings_shared`): the permission surface counts as governed
 (`_permission_surface_governed`), so the array is delivered — but the client takes
 no live claim, records nothing, and `_claude_settings_authored` stays false, so its
 teardown neither unlinks the file the owning session is still running against nor
-pops that owner's live slot. A payload that differs in any byte — another
-permission mode, another agent's deny rules, another allowlist — fails the digest
-half and is refused exactly as before. The hazard the live-holder rule exists for
-only arises when the payloads differ, so byte-equality is the precise boundary of
-the relaxation. The boundary deliberately includes the model keys: the file pins
-model resolution for every session that reads it, so sharing across a model
-difference would silently override the sibling's own pick. Every refusal logs the
-same quiet informational message (`_log_declined_share`) naming what the session
-runs without.
+pops that owner's live slot.
+
+Only the model half (`availableModels`, `model`) may differ from the payload this
+client would have written (`_share_sibling_settings_seed`). It grants no permission,
+and each session's own model reaches the adapter live: `_apply_startup_model` pushes
+it over `session/set_config_option`, which claude-agent-acp accepts only for an
+`availableModels` entry. So the seed must list this session's `model`, or name none
+when this session pins none. A pinned session then runs its own pin, and an
+unpinned one starts on the adapter's default rather than the owner's pin. The seed's
+bytes are read only when they match the durable record, through the same bounded,
+no-follow, non-blocking read the ownership check uses (`_settings_path_bytes`), and
+the share validates exactly those bytes. A seed that differs in a permission key —
+another permission mode, another agent's deny rules — or that would keep this
+session off its own model is refused exactly as before. The hazard the live-holder
+rule exists for only arises when the permissions differ, so they are the boundary
+of the relaxation. Every refusal logs the same quiet informational message
+(`_log_declined_share`) naming what the session runs without.
 
 The sharer's stake is a live registration (`seed_provenance.share`, taken BEFORE
 the byte checks so the owner's teardown cannot validate-race it; withdrawn on the

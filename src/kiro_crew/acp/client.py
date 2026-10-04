@@ -4914,27 +4914,39 @@ class AcpClient:
         underneath it. ``None`` means Crew has no claim to check, which reads as
         "not ours".
         """
+        return AcpClient._settings_path_bytes(path, expectation) is not None
+
+    @staticmethod
+    def _settings_path_bytes(path: Path, expectation: tuple[int, str] | None) -> bytes | None:
+        """The bytes at *path* when they are exactly *expectation*, else ``None``.
+
+        The read behind :meth:`_settings_path_holds`, for a caller that needs the
+        verified bytes themselves: no link followed, no FIFO waited on, nothing but
+        a regular file of the expected size, and never more than one byte past it.
+        """
         if expectation is None:
-            return False
+            return None
         size, sha = expectation
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
             fd = os.open(path, flags)
         except OSError:
-            return False
+            return None
         try:
             st = os.fstat(fd)
             # A FIFO, device or directory is not Crew's file, and reading one is
             # the hazard. Size first: it settles a huge file without reading it.
             if not stat.S_ISREG(st.st_mode) or st.st_size != size:
-                return False
+                return None
             # ONE byte past the recorded length, so a file that grew between the
             # fstat and the read is rejected on length rather than matching on a
             # prefix hash. Bounded either way: a few hundred bytes, never the file.
             chunk = os.read(fd, size + 1)
-            return len(chunk) == size and hashlib.sha256(chunk).hexdigest() == sha
+            if len(chunk) == size and hashlib.sha256(chunk).hexdigest() == sha:
+                return chunk
+            return None
         except OSError:
-            return False
+            return None
         finally:
             os.close(fd)
 
@@ -5561,19 +5573,45 @@ class AcpClient:
         )
         return True
 
-    def _share_settings_seed_ignoring_model(self, local_settings: Path, payload: str) -> bool:
-        """:meth:`_share_settings_seed_if_identical`, retried without *payload*'s ``model`` key.
+    def _share_sibling_settings_seed(self, local_settings: Path, payload: str) -> bool:
+        """Share a sibling's seed that governs this session and runs its model.
 
-        ``model`` grants no permission and :meth:`_apply_startup_model` sets it
-        live, so a sibling seed that differs only there still governs this session.
+        Only the model half (``availableModels``, ``model``) may differ from
+        *payload*. It grants no permission, and :meth:`_apply_startup_model` pushes
+        this session's model live -- a push the adapter accepts only for an
+        ``availableModels`` entry. So the seed must list *payload*'s ``model``, or
+        name none when *payload* names none. Its bytes are read only as the durable
+        record's, and the share then validates exactly those bytes.
         """
         if self._share_settings_seed_if_identical(local_settings, payload):
             return True
-        settings = json.loads(payload)
-        if settings.pop("model", None) is None:
+        raw = self._settings_path_bytes(
+            local_settings, seed_provenance.recorded_durable(local_settings)
+        )
+        if raw is None:
             return False
-        modelless_payload = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
-        return self._share_settings_seed_if_identical(local_settings, modelless_payload)
+        try:
+            seed_payload = raw.decode("utf-8")
+            seed = json.loads(seed_payload)
+        except ValueError:
+            return False
+        if not isinstance(seed, dict):
+            return False
+        own = json.loads(payload)
+        model = own.get("model")
+        if model is None:
+            runs_own_model = "model" not in seed
+        else:
+            offered = seed.get("availableModels")
+            runs_own_model = isinstance(offered, list) and model in offered
+        same_permissions = all(
+            seed.get(key) == own.get(key)
+            for key in seed.keys() | own.keys()
+            if key not in ("availableModels", "model")
+        )
+        if not (runs_own_model and same_permissions):
+            return False
+        return self._share_settings_seed_if_identical(local_settings, seed_payload)
 
     @staticmethod
     def _rename_aside_noreplace(aside: Path, path: Path) -> bool:
@@ -6257,11 +6295,11 @@ class AcpClient:
                 # Someone else's file: either the user's own project settings, or a
                 # live sibling session's seed (``work_dir`` is caller-supplied and
                 # every keyless client shares one default) -- including a sibling that
-                # won the same orphan a moment ago. When that sibling's seed is
-                # byte-identical to what this session would have written, the surface
+                # won the same orphan a moment ago. When that sibling's seed carries
+                # this session's permissions and lets it run its own model, the surface
                 # already governs this session and is shared rather than refused --
                 # without a write, a claim, or any right to remove it later.
-                shared = self._share_settings_seed_ignoring_model(local_settings, payload)
+                shared = self._share_sibling_settings_seed(local_settings, payload)
                 self._invalidate_session_mcp_projection()
                 if shared:
                     return
@@ -6461,7 +6499,7 @@ class AcpClient:
                     fd = os.open(local_settings, flags, 0o600)
                 except FileExistsError:
                     # A sibling won the create race. When its just-written seed is
-                    # already recorded and byte-identical to this payload, share it
+                    # already recorded and shareable with this payload, share it
                     # exactly as the pre-existing-file branch above does. The poll
                     # exists ONLY for the winner's persist still being in flight
                     # (one local sidecar write, ordinarily milliseconds). It ends
@@ -6480,7 +6518,7 @@ class AcpClient:
                     deadline = time.monotonic() + 2.0
                     while True:
                         settled = seed_provenance.recorded_durable(local_settings) == want
-                        if self._share_settings_seed_ignoring_model(local_settings, payload):
+                        if self._share_sibling_settings_seed(local_settings, payload):
                             self._invalidate_session_mcp_projection()
                             return
                         if settled or time.monotonic() >= deadline:

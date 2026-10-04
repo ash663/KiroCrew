@@ -1302,17 +1302,18 @@ class TestCrossSessionAdoption:
 
 
 class TestSharedPermissionSurface:
-    """A byte-identical sibling seed is shared, never rewritten and never removed.
+    """A sibling seed carrying this session's permissions is shared, never rewritten.
 
     The one relaxation of the live-holder rule: two sessions of the same agent
-    in the same ``work_dir`` render the same payload, and without sharing only
+    in the same ``work_dir`` render the same permissions, and without sharing only
     the FIRST one gets Crew's MCP tools -- the second
     lost the live slot, fell to the leave-it-alone branch, and ran with the
     whole ``mcpServers`` array withheld. The hazard the live-holder rule guards
     against (re-seeding with a different ``permissions.defaultMode``, unlinking
-    the owner's file) only exists when the payloads DIFFER, so byte-equality
-    against both the durable record and the file on disk is the exact boundary
-    of what may be shared.
+    the owner's file) only exists when the permissions DIFFER, so they -- on a
+    seed whose bytes match both the durable record and the file on disk -- are
+    the boundary of what may be shared. The model half may differ only where the
+    session still runs its own model.
     """
 
     def test_refused_record_on_o_excl_path_preserves_foreign_bytes(self, tmp_path, monkeypatch):
@@ -1418,6 +1419,100 @@ class TestSharedPermissionSurface:
             permission_surface_owned=sibling._permission_surface_governed,
         )
         assert projection.params["mcpServers"] != []
+
+    def test_a_sibling_pinned_to_another_model_shares_the_seed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(_SERVED)})
+        owner = _client(tmp_path, model=_SERVED[0])
+        owner._write_claude_local_settings()
+        assert _seed(tmp_path)["model"] == _SERVED[0]
+
+        sibling = _client(tmp_path, model=_SERVED[1])
+        assert json.loads(sibling._render_claude_settings_payload())["model"] == _SERVED[1]
+        sibling._write_claude_local_settings()
+
+        assert sibling._claude_settings_shared is True
+        assert sibling._permission_surface_governed is True
+
+    def test_a_sibling_offered_another_model_list_shares_the_seed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(_SERVED)})
+        owner = _client(tmp_path, model=_SERVED[0])
+        owner._write_claude_local_settings()
+        seeded = _seed(tmp_path)
+
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(reversed(_SERVED))})
+        sibling = _client(tmp_path, model=_SERVED[0])
+        rendered = json.loads(sibling._render_claude_settings_payload())
+        assert rendered["availableModels"] != seeded["availableModels"]
+        sibling._write_claude_local_settings()
+
+        assert sibling._claude_settings_shared is True
+        assert sibling._permission_surface_governed is True
+        assert _seed(tmp_path) == seeded
+
+    def test_an_auto_sibling_offered_another_model_list_shares_the_seed(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(_SERVED)})
+        owner = _client(tmp_path)
+        owner._write_claude_local_settings()
+        seeded = _seed(tmp_path)
+
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(reversed(_SERVED))})
+        sibling = _client(tmp_path)
+        rendered = json.loads(sibling._render_claude_settings_payload())
+        assert "model" not in rendered
+        assert rendered["availableModels"] != seeded["availableModels"]
+        sibling._write_claude_local_settings()
+
+        assert sibling._claude_settings_shared is True
+        assert sibling._permission_surface_governed is True
+        assert _seed(tmp_path) == seeded
+
+    def test_a_sibling_whose_model_the_seed_does_not_list_is_refused(self, tmp_path, monkeypatch):
+        # The adapter takes a pushed model only from the seed's availableModels, so
+        # sharing would leave the sibling on the owner's model instead of its own.
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": _SERVED[:1]})
+        owner = _client(tmp_path, model=_SERVED[0])
+        owner._write_claude_local_settings()
+        before = _settings(tmp_path).read_text(encoding="utf-8")
+
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(_SERVED)})
+        sibling = _client(tmp_path, model=_SERVED[1])
+        sibling._write_claude_local_settings()
+
+        assert sibling._claude_settings_shared is False
+        assert _settings(tmp_path).read_text(encoding="utf-8") == before
+
+    def test_an_auto_sibling_is_refused_a_pinned_seed(self, tmp_path, monkeypatch):
+        # An unpinned session pushes no model, so it would start on the owner's pin.
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(_SERVED)})
+        owner = _client(tmp_path, model=_SERVED[0])
+        owner._write_claude_local_settings()
+
+        sibling = _client(tmp_path)
+        sibling._write_claude_local_settings()
+
+        assert sibling._claude_settings_shared is False
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+    def test_a_fifo_at_the_seed_path_is_refused_without_blocking(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mr, "_ADVERTISED_MODELS", {"claude_code": list(_SERVED)})
+        owner = _client(tmp_path, model=_SERVED[0])
+        owner._write_claude_local_settings()
+        path = _settings(tmp_path)
+        path.unlink()
+        os.mkfifo(path)
+
+        sibling = _client(tmp_path, model=_SERVED[1])
+        worker = threading.Thread(target=sibling._write_claude_local_settings, daemon=True)
+        worker.start()
+        worker.join(10)
+        if worker.is_alive():
+            # A blocking open is waiting for a writer; give it one so the thread ends.
+            os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+            worker.join(10)
+            pytest.fail("the share read blocked on a FIFO at the seed path")
+        assert sibling._claude_settings_shared is False
 
     def test_failed_revalidation_clears_governed_but_keeps_lease(self, tmp_path, monkeypatch):
         client = _client(tmp_path)
