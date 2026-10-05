@@ -38,6 +38,7 @@ from kiro_crew.acp._dispatch import (
     parse_codex_compaction_update,
     parse_metadata,
     parse_prompt_token_usage,
+    parse_prompt_turn_model,
     parse_refusal,
     parse_session_update,
     parse_text_chunk,
@@ -1332,6 +1333,9 @@ class AcpSessionHandle:
         # (mirrors AcpClient._resolved_model_id; avoids the profile-id
         # pinning trap where a resolved profile id poisons slot.model).
         self._resolved_model_id: str = ""
+        # The model the last prompt response reported serving its turn
+        # (mirrors AcpClient.turn_model); "" until a turn reports one.
+        self.turn_model: str = ""
         # The model a non-strict config-option push was refused on, or ``""``
         # (mirrors AcpClient.model_pin_refused). The refusal stays on the
         # backend default without raising, so this is the only trace of it.
@@ -1937,6 +1941,8 @@ class AcpSessionHandle:
             )
 
         self.last_prompt_stats = self.last_prompt_stats.carry_over()
+        # A turn that ends without a PromptResponse must not inherit the last one's model.
+        self.turn_model = ""
 
         # send_request must be inside the turn-state guard: _turn_done was just
         # cleared above, so if the request raises (e.g. AcpRuntimeDead on a
@@ -2551,6 +2557,8 @@ class AcpSessionHandle:
             )
         self._model = resolved
         self.model_pin_refused = ""
+        # The last turn's report names the model before this switch.
+        self.turn_model = ""
         # Parity with AcpClient.set_model: keep _resolved_model_id in sync so
         # _backfill_context_window looks up the NEW model's window after a switch
         # (otherwise the context meter converts pct against the stale session/new
@@ -3181,7 +3189,14 @@ class AcpSessionHandle:
             METHOD_SET_CONFIG_OPTION,
             {"sessionId": self._session_id, "configId": config_id, "value": value},
         )
-        await self._wait_for_response(req_id, timeout=10.0)
+        msg = await self._wait_for_response(req_id, timeout=10.0)
+        # The response carries every option's value after the write, which is how
+        # the level the adapter actually accepted becomes readable.
+        result = getattr(msg, "result", None)
+        config_options = result.get("configOptions") if isinstance(result, dict) else None
+        if isinstance(config_options, list):
+            self._config_options = config_options
+            self._sync_effort_levels()
 
     async def _send_awaited(self, method: str, params: dict[str, Any]) -> int:
         """Send a request whose response a following _wait_for_response claims.
@@ -3661,6 +3676,8 @@ class AcpSessionHandle:
         modes = resp.get("modes")
         current_agent = modes.get("currentModeId") if isinstance(modes, dict) else None
         self.active_agent = current_agent if isinstance(current_agent, str) else ""
+        # A new or reloaded session has not reported a turn yet.
+        self.turn_model = ""
         config_options = resp.get("configOptions")
         if isinstance(config_options, list):
             self._config_options = config_options
@@ -5461,6 +5478,9 @@ class AcpSessionHandle:
         tokens = parse_prompt_token_usage(result)
         if tokens is not None:
             self.last_prompt_stats.apply_prompt_token_usage(*tokens)
+        model = parse_prompt_turn_model(result)
+        if model:
+            self.turn_model = model
 
     def _track_metadata(self, msg: JsonRpcMessage) -> None:
         """Capture per-turn context usage + kiro billing credits from _kiro.dev/metadata.

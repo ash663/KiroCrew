@@ -6372,7 +6372,16 @@
       "terminal_review": "Revisar y ejecutar en el terminal",
       "terminal_force_stop": "Detener agente",
       "terminal_pending": "Espera a que se carguen los detalles de la sesión o selecciona otra sesión.",
-      "terminal_run_review": "Revisar comando de terminal"
+      "terminal_run_review": "Revisar comando de terminal",
+      "agent_backend": "Backend del agente",
+      "gateway_tools": "Herramientas de {{productName}}",
+      "gateway_tools_connected": "Conectadas",
+      "gateway_tools_failed": "Las herramientas de {{productName}} no se iniciaron en esta sesión.",
+      "gateway_tools_sent": "Enviadas",
+      "gateway_tools_not_sent": "No enviadas",
+      "gateway_tools_pending": "Aún sin informe",
+      "gateway_tools_missing": "Esta sesión no tiene las herramientas de {{productName}}",
+      "model_selected": "Seleccionado: {{name}}"
     },
     "chatPane": {
       "agent_list": "Lista de agentes",

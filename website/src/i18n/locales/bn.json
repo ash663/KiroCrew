@@ -6273,7 +6273,16 @@
       "terminal_review": "পর্যালোচনা করে টার্মিনালে চালাও",
       "terminal_force_stop": "এজেন্ট থামাও",
       "terminal_pending": "সেশনের তথ্য লোড হওয়া পর্যন্ত অপেক্ষা করো অথবা অন্য সেশন বেছে নাও।",
-      "terminal_run_review": "টার্মিনাল কমান্ড দেখে নাও"
+      "terminal_run_review": "টার্মিনাল কমান্ড দেখে নাও",
+      "agent_backend": "এজেন্ট ব্যাকএন্ড",
+      "gateway_tools": "{{productName}} টুল",
+      "gateway_tools_connected": "সংযুক্ত",
+      "gateway_tools_failed": "এই সেশনে {{productName}} টুল চালু হয়নি।",
+      "gateway_tools_sent": "পাঠানো হয়েছে",
+      "gateway_tools_not_sent": "পাঠানো হয়নি",
+      "gateway_tools_pending": "এখনও জানানো হয়নি",
+      "gateway_tools_missing": "এই সেশনে {{productName}} টুল নেই",
+      "model_selected": "নির্বাচিত: {{name}}"
     },
     "chatPane": {
       "agent_list": "এজেন্ট তালিকা",

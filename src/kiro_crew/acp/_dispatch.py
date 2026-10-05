@@ -3100,6 +3100,42 @@ def parse_prompt_token_usage(result: Any) -> tuple[int, int, int, int] | None:
     return _count(keys[0]), _count(keys[1]), _count(keys[2]), _count(keys[3])
 
 
+# A model id is agent-supplied text bound for logs and the dashboard.
+_TURN_MODEL_CAP = 200
+
+
+def parse_prompt_turn_model(result: Any) -> str:
+    """The model a PromptResponse reports serving its turn, or ``""``.
+
+    claude-agent-acp and codex-acp put ``_meta.quota.model_usage`` on the prompt
+    response: one row per model the turn spent tokens on, from the harness's own
+    accounting (claude: the SDK's ``result.modelUsage``), so it names the model
+    that ran even when that is not the one Crew selected. The row with the most
+    tokens is the turn's main model. kiro-cli's response carries only
+    ``stopReason``, and that, a malformed shape or nameless rows all answer ``""``.
+    """
+    if not isinstance(result, dict):
+        return ""
+    meta = result.get("_meta")
+    quota = meta.get("quota") if isinstance(meta, dict) else None
+    rows = quota.get("model_usage") if isinstance(quota, dict) else None
+    if not isinstance(rows, list):
+        return ""
+    best, best_tokens = "", -1
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model = row.get("model")
+        if not isinstance(model, str) or not model.strip() or not model.isprintable():
+            continue
+        counts = row.get("token_count")
+        total = _token_count(counts.get("totalTokens")) if isinstance(counts, dict) else None
+        tokens = int(total) if total is not None and total > 0 else 0
+        if tokens > best_tokens:
+            best, best_tokens = model.strip()[:_TURN_MODEL_CAP], tokens
+    return best
+
+
 # Re-export the method names so callers can use a single import site for the
 # kiro handshake (mode/model) requests alongside the param builders.
 __all__ = [
@@ -3115,6 +3151,7 @@ __all__ = [
     "parse_usage_update",
     "parse_usage_cost",
     "parse_prompt_token_usage",
+    "parse_prompt_turn_model",
     "parse_text_chunk",
     "parse_claude_compaction_notice",
     "parse_codex_compaction_update",

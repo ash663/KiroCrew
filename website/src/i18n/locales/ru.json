@@ -6471,7 +6471,16 @@
       "terminal_review": "Проверить и выполнить в терминале",
       "terminal_force_stop": "Остановить агента",
       "terminal_pending": "Дождись загрузки сведений о сеансе или выбери другой сеанс.",
-      "terminal_run_review": "Проверить команду терминала"
+      "terminal_run_review": "Проверить команду терминала",
+      "agent_backend": "Бэкенд агента",
+      "gateway_tools": "Инструменты {{productName}}",
+      "gateway_tools_connected": "Подключены",
+      "gateway_tools_failed": "Инструменты {{productName}} не запустились в этой сессии.",
+      "gateway_tools_sent": "Переданы",
+      "gateway_tools_not_sent": "Не переданы",
+      "gateway_tools_pending": "Пока нет отчёта",
+      "gateway_tools_missing": "В этой сессии нет инструментов {{productName}}",
+      "model_selected": "Выбрано: {{name}}"
     },
     "chatPane": {
       "agent_list": "Список агентов",

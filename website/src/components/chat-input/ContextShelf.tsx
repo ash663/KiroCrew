@@ -1,15 +1,33 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Bot } from 'lucide-react'
+import { AlertTriangle, Bot } from 'lucide-react'
 import AppIcon from '../AppIcon'
 import ContextBar, { contextTip, contextColor, composeContextReadout, contextPctClamped, fmtTokens } from '../ContextBar'
 import ErrorNotice from '../ErrorNotice'
 import { Btn, Slider } from '../ui'
+import { acpBackendName } from '../../api/acpBackend'
 import { effortLabel } from '../../lib/effort'
 import { fmtPercent } from '../../i18n/format'
 import { i18nT } from '../../i18n/t'
+import { ROUTING_PREFIX_RE } from '../../providers/modelRegistry'
+import type { GatewayToolsState } from '../../lib/mcpSessionReport'
 import type { ComposerControl } from '../composerControl'
 import type { ChatInputProps } from './props'
 import type { useAutoCompactThreshold } from './autoCompact'
+
+/** Catalog KEY per gateway-tools state, a flat Record of full literal keys
+ *  indexed inline at the `i18nT()` call so the key checker can resolve it
+ *  (the `EFFORT_LABEL_KEY` shape). */
+const GATEWAY_TOOLS_LABEL_KEY: Record<Exclude<GatewayToolsState, 'failed'>, string> = {
+  connected: 'components.chatInput.gateway_tools_connected',
+  sent: 'components.chatInput.gateway_tools_sent',
+  not_sent: 'components.chatInput.gateway_tools_not_sent',
+  pending: 'components.chatInput.gateway_tools_pending',
+}
+
+/** A session that did not receive Kiro Crew's own tools: the agent chip warns. */
+function gatewayToolsMissing(state: GatewayToolsState | null | undefined): boolean {
+  return state === 'not_sent' || state === 'failed'
+}
 
 /* The context shelf under the composer: its measured width (which collapses
    the chips to icons) and the controls that stand on it -- app session
@@ -141,45 +159,50 @@ export function SessionControlChips({ sessionControls, shelfCompact, onSessionCo
 /** The agent chip. Chrome type: an agent name is a label, not code. `font-mono`
  *  would pin `var(--mono)`, which Settings → Display → Font Family never
  *  writes, so it would make the shelf ignore the user's typeface. */
-export function AgentChip({ agentName, agentLabel, agentIsInheritedDefault, agentSource, isRunning, shelfCompact, onAgentClick }: {
+export function AgentChip({ agentName, agentLabel, agentIsInheritedDefault, agentSource, gatewayTools, isRunning, shelfCompact, onAgentClick }: {
   agentName: string
   agentLabel?: string
   agentIsInheritedDefault?: boolean
   agentSource?: string
+  gatewayTools?: GatewayToolsState | null
   isRunning: boolean
   shelfCompact: boolean
   onAgentClick: NonNullable<ChatInputProps['onAgentClick']>
 }) {
+  // Inherited default: explain what the ` . default` marker means, on
+  // hover (title) AND keyboard focus / screen readers (aria-label),
+  // because the marker alone reads as opaque (#8770 UX). No glyph, no
+  // layout change -- text on demand. A pinned chip keeps the plain
+  // switch hint; it has nothing to explain.
+  const switchHint = isRunning
+    ? i18nT('components.chatInput.stop_the_current_response_to_switch_agents')
+    : agentIsInheritedDefault
+      ? i18nT('components.chatInput.agent_inherited_default', { name: agentName })
+      : i18nT('components.chatInput.agent', { name: agentName })
+  // A session without Kiro Crew's own tools fails every tool the agent is told
+  // it has, so the chip says so before the first turn rather than after it.
+  const toolsMissing = gatewayToolsMissing(gatewayTools)
+  const chipName = toolsMissing
+    ? `${switchHint} · ${i18nT('components.chatInput.gateway_tools_missing')}`
+    : switchHint
   return (
     <button
       className={`inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] px-2.5 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent ${agentSource === 'package' ? 'text-[var(--aim)] hover:text-[var(--aim)]' : 'text-muted hover:text-text disabled:hover:text-muted'}`}
       onClick={e => onAgentClick(e.currentTarget.getBoundingClientRect(), e.currentTarget)}
       disabled={isRunning}
-      // Inherited default: explain what the ` . default` marker means, on
-      // hover (title) AND keyboard focus / screen readers (aria-label),
-      // because the marker alone reads as opaque (#8770 UX). No glyph, no
-      // layout change -- text on demand. A pinned chip keeps the plain
-      // switch hint; it has nothing to explain.
-      title={isRunning
-        ? i18nT('components.chatInput.stop_the_current_response_to_switch_agents')
-        : agentIsInheritedDefault
-          ? i18nT('components.chatInput.agent_inherited_default', { name: agentName })
-          : i18nT('components.chatInput.agent', { name: agentName })}
-      aria-label={isRunning
-        ? i18nT('components.chatInput.stop_the_current_response_to_switch_agents')
-        : agentIsInheritedDefault
-          ? i18nT('components.chatInput.agent_inherited_default', { name: agentName })
-          : i18nT('components.chatInput.agent', { name: agentName })}
+      title={chipName}
+      aria-label={chipName}
     >
       <Bot size={13} className="shrink-0 opacity-70" />
       {!shelfCompact && <span className="truncate max-w-[160px]">{agentLabel ?? agentName}</span>}
+      {toolsMissing && <AlertTriangle size={12} className="shrink-0 text-warn" aria-hidden="true" data-testid="agent-chip-tools-missing" />}
     </button>
   )
 }
 
 /** The context-window readout and its popover (usage, model, the per-session
  *  auto-compact threshold). */
-export function ContextUsageControl({ contextPct, contextUsedTokens, contextWindowTokens, showContextPct, showContextTokens, shelfCompact, modelName, ctxPopoverOpen, setCtxPopoverOpen, ctxWrapRef, autoCompactThreshold }: {
+export function ContextUsageControl({ contextPct, contextUsedTokens, contextWindowTokens, showContextPct, showContextTokens, shelfCompact, modelName, sessionBackend, gatewayTools, ctxPopoverOpen, setCtxPopoverOpen, ctxWrapRef, autoCompactThreshold }: {
   contextPct: number
   contextUsedTokens?: number
   contextWindowTokens?: number
@@ -187,6 +210,8 @@ export function ContextUsageControl({ contextPct, contextUsedTokens, contextWind
   showContextTokens?: boolean
   shelfCompact: boolean
   modelName?: string
+  sessionBackend?: string | null
+  gatewayTools?: GatewayToolsState | null
   ctxPopoverOpen: boolean
   setCtxPopoverOpen: (update: (open: boolean) => boolean) => void
   ctxWrapRef: React.RefObject<HTMLDivElement>
@@ -228,9 +253,29 @@ export function ContextUsageControl({ contextPct, contextUsedTokens, contextWind
                   <div className="flex justify-between"><span className="text-muted">{i18nT('components.chatInput.remaining')}</span><span className="text-text">{approx ? '~' : ''}{fmtTokens(remaining)}</span></div>
                   <div className="flex justify-between"><span className="text-muted">{i18nT('components.chatInput.total')}</span><span className="text-text">{fmtTokens(win)}</span></div>
                 </div>
-                {modelName && (
-                  <div className="mt-2 pt-2 border-t border-border flex justify-between text-[11px] font-mono">
-                    <span className="text-muted">{i18nT('components.chatInput.model')}</span><span className="text-text truncate max-w-[120px]" title={modelName}>{modelName}</span>
+                {(modelName || sessionBackend != null || gatewayTools) && (
+                  <div className="mt-2 pt-2 border-t border-border flex flex-col gap-1 text-[11px] font-mono">
+                    {modelName && (
+                      <div className="flex justify-between"><span className="text-muted">{i18nT('components.chatInput.model')}</span><span className="text-text truncate max-w-[120px]" title={modelName}>{modelName}</span></div>
+                    )}
+                    {/* What the live session reports, so a config switch or a
+                        member route that moved the backend reads here. */}
+                    {sessionBackend != null && (
+                      <div className="flex justify-between" data-testid="context-session-backend"><span className="text-muted">{i18nT('components.chatInput.agent_backend')}</span><span className="text-text truncate max-w-[120px]">{acpBackendName({ id: sessionBackend })}</span></div>
+                    )}
+                    {gatewayTools && gatewayTools !== 'failed' && (
+                      <div className="flex justify-between gap-2" data-testid="context-gateway-tools"><span className="text-muted">{i18nT('components.chatInput.gateway_tools')}</span><span className={`truncate max-w-[120px] ${gatewayToolsMissing(gatewayTools) ? 'text-warn' : 'text-text'}`}>{i18nT(GATEWAY_TOOLS_LABEL_KEY[gatewayTools])}</span></div>
+                    )}
+                  </div>
+                )}
+                {gatewayTools === 'failed' && (
+                  <div className="mt-2 pt-2 border-t border-border">
+                    {/* No hand-off: the composer draft below is unsaved. */}
+                    <ErrorNotice
+                      variant="inline"
+                      testId="context-gateway-tools-failed"
+                      message={i18nT('components.chatInput.gateway_tools_failed')}
+                    />
                   </div>
                 )}
                 {autoCompactQuery.isLoading && (
@@ -298,8 +343,10 @@ export function ContextUsageControl({ contextPct, contextUsedTokens, contextWind
 /** The model chip. It names the level in force beside the model; the level is
  *  CHANGED inside the model picker the chip opens (model and effort are one
  *  control, docs/decisions/2026-06-14-chat-composer-model-and-effort-are-one-control.md). */
-export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault, modelIsAutoChosen, reasoningEffort, effortIsDefault, hasEffort, isRunning, shelfCompact, shelfTiny, composerControl, modelChipPressedFromComposerRef, onModelClick }: {
+export function ModelChip({ modelName, modelSelected, sessionBackend, modelIsJevRouted, modelIsInheritedDefault, modelIsAutoChosen, reasoningEffort, effortIsDefault, hasEffort, isRunning, shelfCompact, shelfTiny, composerControl, modelChipPressedFromComposerRef, onModelClick }: {
   modelName: string
+  modelSelected?: string
+  sessionBackend?: string | null
   modelIsJevRouted?: boolean
   modelIsInheritedDefault?: boolean
   modelIsAutoChosen?: boolean
@@ -325,6 +372,15 @@ export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault
   const effortSuffix = hasEffort
     ? ` · ${i18nT('components.reasoningEffortDropdown.reasoning_effort')}: ${effortShown}`
     : ''
+  // The backend the live session runs on, named on the chip so a session that
+  // kept its harness through a config switch does not read as the new one.
+  const backendName = sessionBackend != null ? acpBackendName({ id: sessionBackend }) : ''
+  const backendSuffix = backendName
+    ? ` · ${i18nT('components.chatInput.agent_backend')}: ${backendName}`
+    : ''
+  const selectedSuffix = modelSelected
+    ? ` · ${i18nT('components.chatInput.model_selected', { name: modelSelected })}`
+    : ''
   const modelChipLabel = `${isRunning
     ? i18nT('components.chatInput.stop_the_current_response_to_switch_model')
     : modelIsJevRouted
@@ -333,7 +389,7 @@ export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault
         ? i18nT('components.chatInput.model_inherited_default', { name: modelName })
         : modelIsAutoChosen
           ? `${i18nT('components.chatInput.model_2', { name: modelName })} · ${i18nT('components.jobForm.auto')}`
-          : i18nT('components.chatInput.model_2', { name: modelName })}${effortSuffix}`
+          : i18nT('components.chatInput.model_2', { name: modelName })}${selectedSuffix}${effortSuffix}${backendSuffix}`
   return (
   <button
     className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] text-muted hover:text-text px-2 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
@@ -359,8 +415,18 @@ export function ModelChip({ modelName, modelIsJevRouted, modelIsInheritedDefault
     title={modelChipLabel}
     aria-label={modelChipLabel}
   >
+    {/* The backend leads and yields first: on a compact shelf the title above
+        still names it. */}
+    {backendName && !shelfCompact && (
+      <>
+        <span className="opacity-60 shrink-0" data-testid="composer-model-chip-backend">{backendName}</span>
+        <span className="opacity-30 select-none shrink-0" aria-hidden="true">·</span>
+      </>
+    )}
+    {/* The routing prefix of a wire id (`global.anthropic.`) is dropped from
+        the visible name only, as the turn footer does; the title keeps it. */}
     <span className="truncate max-w-[180px]">
-      {modelIsJevRouted ? i18nT('components.modelDropdownList.auto_jev') : modelName}
+      {modelIsJevRouted ? i18nT('components.modelDropdownList.auto_jev') : modelName.replace(ROUTING_PREFIX_RE, '')}
     </span>
     {/* Outside the truncating span: a long provider-prefixed id must
         ellipsize its own tail, never the marker beside it. A routed chip
