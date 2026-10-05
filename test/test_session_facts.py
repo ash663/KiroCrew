@@ -79,6 +79,17 @@ def test_turn_model_is_empty_when_the_response_names_no_model(result) -> None:
     assert parse_prompt_turn_model(result) == ""
 
 
+def test_turn_model_is_redacted_whole_before_its_cap() -> None:
+    # Harness-authored text bound for the chip, the Slack footer and the usage record: a
+    # cap taken first passed a key through raw and cut this one to a fragment at 200.
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    model = "m" * 190 + " " + secret
+    rows = [{"model": model, "token_count": {"totalTokens": 5}}]
+    turn_model = parse_prompt_turn_model({"_meta": {"quota": {"model_usage": rows}}})
+    assert "AKIA" not in turn_model
+    assert len(turn_model) <= 200
+
+
 def test_client_turn_model_follows_prompt_responses_and_resets_with_the_session(tmp_path) -> None:
     client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
     client._track_prompt_usage(_PROMPT_RESULT)
@@ -122,6 +133,30 @@ async def test_claude_effort_is_the_level_the_adapter_answers_with(tmp_path) -> 
     await client.set_config_option("effort", "max")
 
     assert provider.applied_effort == "max"
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_answer_leaves_the_cached_options(tmp_path) -> None:
+    # The answer replaces the cached options and its effort rides every slots snapshot,
+    # so one past the size bound is not kept: this 70 KB level would ride each one.
+    provider = AcpProvider(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
+    client = provider._client
+    client._session_id = "sid"
+    client._acp_config_options = [_effort_option("high")]
+    client._send_request = AsyncMock(return_value=7)
+    answer = {"configOptions": [_effort_option("x" * 70_000)]}
+    client._wait_for_response = AsyncMock(return_value=answer)
+
+    await client.set_config_option("effort", "max")
+
+    assert client.acp_config_options == [_effort_option("high")]
+    assert provider.applied_effort == "high"
+
+
+def test_a_reported_effort_that_is_no_effort_name_reads_as_none(tmp_path) -> None:
+    provider = AcpProvider(work_dir=tmp_path, acp_backend=ACP_BACKEND_CLAUDE)
+    provider._client._acp_config_options = [_effort_option("Max\n" + "x" * 300)]
+    assert provider.applied_effort is None
 
 
 def test_kiro_effort_is_the_overlay_level_for_the_current_model(tmp_path) -> None:

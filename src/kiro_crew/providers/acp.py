@@ -438,6 +438,17 @@ def _is_transient_resume_lock_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _RESUME_TRANSIENT_LOCK_MARKERS)
 
 
+def _reported_effort(level: str) -> str | None:
+    """A harness-reported effort level the slot may retain, or ``None``.
+
+    The level rides every slots snapshot, so only one the effort-name check
+    accepts (short, lowercase) is kept; anything else reads as no level reported.
+    """
+    from kiro_crew.dashboard.chat_persistence import cap_effort_capability_levels
+
+    return level if level and cap_effort_capability_levels([level], source="reported") else None
+
+
 class AcpProvider(LLMProvider):
     """LLMProvider backed by ACP JSON-RPC over stdio (kiro-cli or claude-agent-acp)."""
 
@@ -695,7 +706,7 @@ class AcpProvider(LLMProvider):
         current model. A pair-id harness that advertises no effort option
         carries the level in its current model id (``<model>[<effort>]``).
         ``""`` is the harness's own default; ``None`` means this harness has no
-        effort channel or reported no level.
+        effort channel or reported no level, or none that is an effort name.
         """
         backend = self._client.backend
         if backend in ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION:
@@ -704,9 +715,9 @@ class AcpProvider(LLMProvider):
                 if isinstance(option, dict) and option.get("id") == option_id:
                     value = option.get("currentValue")
                     if isinstance(value, str):
-                        return "" if value == _HARNESS_DEFAULT_EFFORT else value
+                        return "" if value == _HARNESS_DEFAULT_EFFORT else _reported_effort(value)
             if backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS:
-                return model_registry.split_effort_suffix(self.served_model)[1] or None
+                return _reported_effort(model_registry.split_effort_suffix(self.served_model)[1])
             return None
         if backend in ACP_BACKENDS_KIRO_SLASH_COMMANDS:
             return self._resolve_effort() or ""

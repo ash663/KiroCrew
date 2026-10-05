@@ -73,6 +73,7 @@ from kiro_crew.acp._dispatch import (
     _loggable_request_id,
     _measure_tool_output,
     agent_version_from_init,
+    bounded_config_options,
     build_permission_event,
     build_session_new_params,
     classify_tool_call,
@@ -7567,8 +7568,8 @@ class AcpClient:
         result = await self._wait_for_response(req_id, timeout=10.0)
         # The response carries every option's value after the write, which is how
         # the level the adapter actually accepted becomes readable.
-        config_options = result.get("configOptions") if isinstance(result, dict) else None
-        if isinstance(config_options, list):
+        config_options = bounded_config_options(result)
+        if config_options is not None:
             self._acp_config_options = config_options
             self._sync_effort_levels()
 

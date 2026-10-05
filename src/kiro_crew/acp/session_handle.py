@@ -30,6 +30,7 @@ from kiro_crew import acp_tool_gate, model_registry, permission_floor
 from kiro_crew.acp import kas_wire
 from kiro_crew.acp._dispatch import (
     DRAIN_YIELD_AFTER_S,
+    bounded_config_options,
     build_permission_event,
     classify_notification,
     error_is_refusal_terminal,
@@ -3192,9 +3193,8 @@ class AcpSessionHandle:
         msg = await self._wait_for_response(req_id, timeout=10.0)
         # The response carries every option's value after the write, which is how
         # the level the adapter actually accepted becomes readable.
-        result = getattr(msg, "result", None)
-        config_options = result.get("configOptions") if isinstance(result, dict) else None
-        if isinstance(config_options, list):
+        config_options = bounded_config_options(getattr(msg, "result", None))
+        if config_options is not None:
             self._config_options = config_options
             self._sync_effort_levels()
 

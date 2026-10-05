@@ -3100,7 +3100,8 @@ def parse_prompt_token_usage(result: Any) -> tuple[int, int, int, int] | None:
     return _count(keys[0]), _count(keys[1]), _count(keys[2]), _count(keys[3])
 
 
-# A model id is agent-supplied text bound for logs and the dashboard.
+# A model id is agent-supplied text bound for logs, the dashboard and Slack, so it
+# is capped only after ``redact_backend_text`` has seen it whole.
 _TURN_MODEL_CAP = 200
 
 
@@ -3132,8 +3133,30 @@ def parse_prompt_turn_model(result: Any) -> str:
         total = _token_count(counts.get("totalTokens")) if isinstance(counts, dict) else None
         tokens = int(total) if total is not None and total > 0 else 0
         if tokens > best_tokens:
-            best, best_tokens = model.strip()[:_TURN_MODEL_CAP], tokens
+            best, best_tokens = redact_backend_text(model.strip())[:_TURN_MODEL_CAP], tokens
     return best
+
+
+# A harness's own answer runs to a few KB.
+_CONFIG_OPTIONS_MAX_BYTES = 64 * 1024
+
+
+def bounded_config_options(result: Any) -> list | None:
+    """The ``configOptions`` a set_config_option response carries, if retainable.
+
+    The list replaces the session's cached options and feeds the effort its slot
+    reports, so it is bounded by its whole serialized size, which bounds the
+    option count, every string and every nested container at once: ``None`` when
+    the response carries no list or one over ``_CONFIG_OPTIONS_MAX_BYTES``.
+    """
+    options = result.get("configOptions") if isinstance(result, dict) else None
+    if not isinstance(options, list):
+        return None
+    try:
+        size = len(json.dumps(options, default=str))
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return options if size <= _CONFIG_OPTIONS_MAX_BYTES else None
 
 
 # Re-export the method names so callers can use a single import site for the
@@ -3152,6 +3175,7 @@ __all__ = [
     "parse_usage_cost",
     "parse_prompt_token_usage",
     "parse_prompt_turn_model",
+    "bounded_config_options",
     "parse_text_chunk",
     "parse_claude_compaction_notice",
     "parse_codex_compaction_update",
