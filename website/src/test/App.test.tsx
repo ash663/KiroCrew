@@ -1856,6 +1856,29 @@ describe('onCycleReasoningEffort keyboard shortcut (#5120)', () => {
   })
 })
 
+describe('onCycleReasoningEffort follows the session\'s harness', () => {
+  it('steps over the levels the harness takes, and not at all where it takes none', async () => {
+    const { api } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotReasoningEffort as ReturnType<typeof vi.fn>).mockClear()
+    store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: false, agent: 'kirocrew', reasoning_effort: 'low' }] })
+    store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
+    const { queryClient } = renderWithProviders(<App />, { route: '/chat' })
+    queryClient.setQueryData(['slot-selection-capabilities', 'slot-1'], { known: true, effort_supported: true, effort_levels: ['low', 'high'] })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'D', code: 'KeyD', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotReasoningEffort).toHaveBeenCalledWith('slot-1', 'high')
+
+    ;(api.chatSlotReasoningEffort as ReturnType<typeof vi.fn>).mockClear()
+    queryClient.setQueryData(['slot-selection-capabilities', 'slot-1'], { known: true, effort_supported: false, effort_levels: [] })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'D', code: 'KeyD', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(api.chatSlotReasoningEffort).not.toHaveBeenCalled()
+  })
+})
+
 describe('onCyclePrevAgent edge cases', () => {
   it('does not cycle prev agent when no active slot', async () => {
     const { api } = await import('../api/client')

@@ -287,6 +287,50 @@ describe('CrewEditorDialog — in-place bot editor (CREW-18688)', () => {
     await waitFor(() => expect(mockApi.deleteKirocrewAgent).toHaveBeenCalled())
   })
 
+  it('offers the models of the harness that judges the crew\'s pin, not the configured one', async () => {
+    // A crewmate DM thread on Claude Code under a kiro-cli default: kiro ids are not its choices.
+    mockApi.agentResolvedModel.mockResolvedValue({ model: '', pinned: false, kiro_agent: 'oncall-agent', models_backend: 'claude' })
+    mockApi.models.mockImplementation((backend?: string) => Promise.resolve(backend === 'claude'
+      ? [{ model_name: 'global.anthropic.claude-opus-5-5[1m]' }]
+      : [{ model_name: 'claude-fable-5.1' }]))
+    renderHost()
+    fireEvent.click(screen.getByTestId('open-editor'))
+    const dialog = await screen.findByRole('dialog', { name: /Edit crewmate/ })
+    fireEvent.click(within(dialog).getByTestId('crew-rail-model'))
+
+    expect(await within(dialog).findByRole('option', { name: 'global.anthropic.claude-opus-5-5[1m]' })).toBeInTheDocument()
+    expect(within(dialog).queryByRole('option', { name: 'claude-fable-5.1' })).toBeNull()
+  })
+
+  it('offers no effort pin where the crew\'s harness takes none', async () => {
+    // A codex build that advertises no effort option drops every level a crew pins.
+    mockApi.agentResolvedModel.mockResolvedValue({
+      model: 'claude-opus-5', pinned: true, kiro_agent: 'oncall-agent', reasoning_effort: '',
+      effort_pinned: false, effort_supported: false, effort_levels: [],
+    })
+    renderHost()
+    fireEvent.click(screen.getByTestId('open-editor'))
+    const dialog = await screen.findByRole('dialog', { name: /Edit crewmate/ })
+    fireEvent.click(within(dialog).getByTestId('crew-rail-model'))
+    await waitFor(() => expect(mockApi.agentResolvedModel).toHaveBeenCalled())
+
+    await waitFor(() => expect(within(dialog).queryByRole('combobox', { name: 'Edit reasoning effort' })).toBeNull())
+  })
+
+  it('offers an effort pin where the crew\'s harness takes one on a model the name check does not know', async () => {
+    // A pi crew runs the operator's own model ids, and the name check recognises none of them.
+    mockApi.agentResolvedModel.mockResolvedValue({
+      model: 'ollama/qwen3', pinned: false, kiro_agent: 'oncall-agent', reasoning_effort: '',
+      effort_pinned: false, effort_supported: true, effort_levels: ['low', 'high'],
+    })
+    renderHost()
+    fireEvent.click(screen.getByTestId('open-editor'))
+    const dialog = await screen.findByRole('dialog', { name: /Edit crewmate/ })
+    fireEvent.click(within(dialog).getByTestId('crew-rail-model'))
+
+    expect(await within(dialog).findByRole('combobox', { name: 'Edit reasoning effort' })).toBeInTheDocument()
+  })
+
   it('edits fields on the model, place and routing panes and shows the resolved readout', async () => {
     mockApi.agentResolvedModel.mockResolvedValue({ model: 'claude-opus-5', pinned: true, kiro_agent: 'oncall-agent', reasoning_effort: '', effort_pinned: false })
     renderHost()

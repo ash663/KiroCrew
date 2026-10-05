@@ -94,6 +94,7 @@ class TestSlotSelectionCapabilities:
             "effort_supported": True,
             "effort_levels": levels,
             "model_effort_pair_ids": pair_ids,
+            "models_backend": backend,
         }
 
     @pytest.mark.asyncio
@@ -117,7 +118,12 @@ class TestSlotSelectionCapabilities:
             data = await resp.json()
 
         assert resp.status == 200
-        assert data == {"known": False, "model_effort_pair_ids": True}
+        assert data == {
+            "known": False,
+            "model_effort_pair_ids": True,
+            "effort_supported": False,
+            "effort_levels": [],
+        }
 
     @pytest.mark.asyncio
     async def test_cold_member_session_uses_member_backend_for_pair_ids(self, monkeypatch):
@@ -134,7 +140,13 @@ class TestSlotSelectionCapabilities:
             data = await resp.json()
 
         assert resp.status == 200
-        assert data == {"known": False, "model_effort_pair_ids": True}
+        assert data == {
+            "known": False,
+            "model_effort_pair_ids": True,
+            "models_backend": "codex",
+            "effort_supported": False,
+            "effort_levels": [],
+        }
 
     @pytest.mark.asyncio
     async def test_live_provider_can_report_effort_unsupported(self):
@@ -154,6 +166,7 @@ class TestSlotSelectionCapabilities:
             "effort_supported": False,
             "effort_levels": [],
             "model_effort_pair_ids": False,
+            "models_backend": "opencode",
         }
         provider.get_valid_effort_levels.assert_not_called()
 

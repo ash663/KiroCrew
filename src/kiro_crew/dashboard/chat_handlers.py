@@ -37,6 +37,7 @@ from kiro_crew.config.loader import (
     default_project_dir,
     published_autocompact_pct,
     resolve_agent_bindings,
+    resolve_effective_model,
 )
 from kiro_crew.dashboard import chat_api as _chat_api
 from kiro_crew.dashboard import remote_mirror
@@ -208,6 +209,7 @@ from kiro_crew.dashboard.handlers._shared import (
     cron_slot_creator,
     read_bounded_json,
 )
+from kiro_crew.dashboard.handlers.agents import harness_effort, own_models_backend
 from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
 from kiro_crew.dashboard.remote_adopt import (
     ADOPT_PEER_MODE_UNKNOWN,
@@ -7803,6 +7805,13 @@ async def _configured_backend_for_slot(slot: _ChatSlot) -> str:
     )
 
 
+async def _own_models_field(backend: str) -> dict[str, str]:
+    """``models_backend`` for a slot on *backend*, when its pickers need that backend's list."""
+    config = await asyncio.to_thread(KiroCrewConfig.load)
+    own = own_models_backend(backend, config.agent.acp_backend)
+    return {} if own is None else {"models_backend": own}
+
+
 async def api_chat_slot_selection_capabilities(request: web.Request) -> web.Response:
     """Report the live ACP session's model and effort selection capabilities.
 
@@ -7894,10 +7903,20 @@ async def api_chat_slot_selection_capabilities(request: web.Request) -> web.Resp
         # still knows whether model IDs encode effort, so the picker can render
         # the base rows while live effort options are pending.
         backend = await _configured_backend_for_slot(slot)
+        effort = harness_effort(state, backend, None)
+        if not effort:
+            # The level rides the model here: the slot's pick, else what its crew resolves to.
+            config = await asyncio.to_thread(KiroCrewConfig.load)
+            model = slot.model or await asyncio.to_thread(
+                resolve_effective_model, config, slot.agent or None
+            )
+            effort = harness_effort(state, backend, model)
         return web.json_response(
             {
                 "known": False,
                 "model_effort_pair_ids": backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS,
+                **await _own_models_field(backend),
+                **effort,
             }
         )
     backend = provider.capabilities.backend
@@ -7932,6 +7951,7 @@ async def api_chat_slot_selection_capabilities(request: web.Request) -> web.Resp
             "effort_supported": supported and bool(levels),
             "effort_levels": levels,
             "model_effort_pair_ids": backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS,
+            **await _own_models_field(backend),
         }
     )
 

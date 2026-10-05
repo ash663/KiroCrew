@@ -12756,6 +12756,7 @@
       "edit_model": "Editar el modelo predeterminado",
       "edit_reasoning_effort": "Editar el esfuerzo de razonamiento",
       "effort_ignored_on_this_model": "{{model}} no acepta un esfuerzo de razonamiento, así que este se ignora mientras se use ese modelo. Bórralo o elige un modelo que razone.",
+      "effort_ignored_by_this_backend": "El backend del agente de este compañero no acepta un esfuerzo de razonamiento, así que este se ignora. Quítalo.",
       "effort_inherited_from_the_global_default": "tomado de tu ajuste predeterminado.",
       "effort_needs_a_model": "No hay esfuerzo de razonamiento hasta que se elija un modelo: elige uno arriba o define un predeterminado.",
       "effort_pin_needs_a_model": "Este esfuerzo se ignora hasta que se elija un modelo: elige uno arriba o define un predeterminado.",

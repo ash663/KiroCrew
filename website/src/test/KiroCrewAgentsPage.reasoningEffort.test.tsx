@@ -362,3 +362,83 @@ describe('crew editor — reasoning effort pin', () => {
     )
   })
 })
+
+describe('crew editor — model list', () => {
+  it('offers the models of the harness that judges the crew pin, not the configured one', async () => {
+    // A crewmate DM thread on Claude Code under a kiro-cli default: kiro ids are not its choices.
+    mockApi.agentResolvedModel.mockResolvedValue({
+      model: 'claude-opus-5', pinned: true, kiro_agent: 'reviewer-agent',
+      reasoning_effort: 'max', effort_pinned: true, models_backend: 'claude',
+    })
+    mockApi.models.mockImplementation((backend?: string) => Promise.resolve(backend === 'claude'
+      ? [{ model_name: 'global.anthropic.claude-opus-5-5[1m]' }]
+      : [{ model_name: 'claude-opus-5' }, { model_name: 'claude-haiku-4.5' }]))
+    const sheet = await openModelPane({})
+    const models = selectScope(sheet, 'Edit default model')
+
+    expect(await models.findByRole('option', { name: 'global.anthropic.claude-opus-5-5[1m]' })).toBeInTheDocument()
+    expect(models.queryByRole('option', { name: 'claude-haiku-4.5' })).toBeNull()
+  })
+
+  it('says so when the list of the harness that judges the pin fails to load', async () => {
+    // That list keeps no last-good copy, so a failed fetch leaves only Inherited.
+    mockApi.agentResolvedModel.mockResolvedValue({
+      model: 'claude-opus-5', pinned: true, kiro_agent: 'reviewer-agent',
+      reasoning_effort: 'max', effort_pinned: true, models_backend: 'claude',
+    })
+    mockApi.models.mockImplementation((backend?: string) => (backend === 'claude'
+      ? Promise.reject(new Error('Service Unavailable'))
+      : Promise.resolve([{ model_name: 'claude-opus-5' }])))
+    const sheet = await openModelPane({})
+
+    expect(await within(sheet).findByTestId('crew-editor-models-degraded')).toHaveTextContent("Couldn't load the model list")
+  })
+})
+
+describe('crew editor — effort levels', () => {
+  it('offers no effort pin where the crew\'s harness takes none', async () => {
+    // A codex build that advertises no effort option drops every level a crew pins.
+    mockApi.agentResolvedModel.mockResolvedValue({
+      model: 'claude-opus-5', pinned: true, kiro_agent: 'reviewer-agent',
+      reasoning_effort: '', effort_pinned: false, effort_supported: false, effort_levels: [],
+    })
+    const sheet = await openModelPane({ reasoning_effort: '' })
+
+    await waitFor(() => expect(within(sheet).queryByRole('combobox', { name: 'Edit reasoning effort' })).toBeNull())
+  })
+
+  it('offers an effort pin where the crew\'s harness takes one on a model the name check does not know', async () => {
+    // A pi crew runs the operator's own model ids, and the name check recognises none of them.
+    mockApi.agentResolvedModel.mockResolvedValue({
+      model: 'ollama/qwen3', pinned: true, kiro_agent: 'reviewer-agent',
+      reasoning_effort: '', effort_pinned: false, effort_supported: true, effort_levels: ['low', 'high'],
+    })
+    const sheet = await openModelPane({ model: 'ollama/qwen3', reasoning_effort: '' })
+
+    expect(await within(sheet).findByRole('combobox', { name: 'Edit reasoning effort' })).toBeInTheDocument()
+  })
+
+  it('blames the agent backend, not the model, for a stored pin it cannot take', async () => {
+    mockApi.agentResolvedModel.mockResolvedValue({
+      model: 'claude-opus-5', pinned: true, kiro_agent: 'reviewer-agent',
+      reasoning_effort: 'max', effort_pinned: true, effort_supported: false, effort_levels: [],
+    })
+    const sheet = await openModelPane({})
+
+    expect(await within(sheet).findByText(/agent backend takes no reasoning effort/)).toBeInTheDocument()
+    expect(within(sheet).queryByText(/claude-opus-5 does not take a reasoning effort/)).toBeNull()
+  })
+
+  it('offers the levels the crew\'s harness reported', async () => {
+    mockApi.agentResolvedModel.mockResolvedValue({
+      model: 'claude-opus-5', pinned: true, kiro_agent: 'reviewer-agent',
+      reasoning_effort: 'max', effort_pinned: true, effort_supported: true, effort_levels: ['low', 'high'],
+    })
+    const sheet = await openModelPane({ reasoning_effort: 'high' })
+    const effort = selectScope(sheet, 'Edit reasoning effort')
+
+    await waitFor(() => expect(effort.queryByRole('option', { name: 'Medium' })).toBeNull())
+    expect(effort.getByRole('option', { name: 'Low' })).toBeInTheDocument()
+    expect(effort.getByRole('option', { name: 'High' })).toBeInTheDocument()
+  })
+})

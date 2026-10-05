@@ -242,6 +242,8 @@ _FACADE_DEFS = (
     "_fetch_kiro_catalog",
     "_shared_catalog_fetch",
     "_consume_refresh_exception",
+    "own_models_backend",
+    "harness_effort",
     "api_models",
     "api_effort_levels",
     "api_slash_commands",
@@ -540,7 +542,7 @@ def test_every_base_definition_is_in_exactly_one_place() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
     assert defined == set(_FACADE_DEFS)
-    assert len(defined | _MOVED) == len(defined) + len(_MOVED) == 121
+    assert len(defined | _MOVED) == len(defined) + len(_MOVED) == 123
 
 
 def test_the_owners_log_as_the_facade() -> None:

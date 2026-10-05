@@ -7,7 +7,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppDispatch } from '../store'
 import { createSlot } from '../store/chatSlice'
 import { api, type WebhookTokenEntry } from '../api/client'
-import { useAvailableModels } from '../hooks/useAvailableModels'
+import { useAvailableModels, useAvailableModelsQuery } from '../hooks/useAvailableModels'
 import { FOLDER_COLOR_PALETTE } from '../components/folderColorCatalog'
 import { Btn, SendBtn, Input, Badge, SearchInput, PageHeader, EmptyState } from '../components/ui'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
@@ -492,16 +492,19 @@ export function ModelField({ options, value, onChange, hint }: {
 /** The crew's reasoning-effort pin. Rendered only when the model the crew will
  *  actually run on supports effort — the same gate the chat picker uses, so a
  *  crew on Haiku is not offered a control the backend would drop. */
-export function EffortField({ value, onChange }: {
+export function EffortField({ value, onChange, levels }: {
   value: string; onChange: (v: string) => void
+  /** The levels the crew's harness takes; the shared vocabulary when it reported none. */
+  levels?: readonly string[]
 }) {
+  const options = levels ? ['', ...levels.filter(l => l && l !== 'default')] : [...EFFORT_LEVELS]
   return (
     <Field label={i18nT('pages.kiroCrewAgentsPage.reasoning_effort')} hint={i18nT('pages.kiroCrewAgentsPage.reasoning_effort_hint')}>
       <SimpleSelect
-        options={[...EFFORT_LEVELS]}
+        options={options}
         // '' is the inherit sentinel, labelled as such rather than as a level:
         // it means "take the global default", which may itself be a level.
-        optionLabels={EFFORT_LEVELS.map(l => (l === '' ? i18nT('pages.kiroCrewAgentsPage.inherited') : effortLabel(l)))}
+        optionLabels={options.map(l => (l === '' ? i18nT('pages.kiroCrewAgentsPage.inherited') : effortLabel(l)))}
         value={value}
         onChange={onChange}
         aria-label={i18nT('pages.kiroCrewAgentsPage.edit_reasoning_effort')}
@@ -954,14 +957,9 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
   // as though those were the only choices. One notice, first failure wins.
   const editorOptionsError = installedError ?? workspacesError ?? cfgError
 
-  // Model list for the per-agent default. Same query key as every other model
-  // picker so the list is fetched once. INHERIT_MODEL leads so "no pin" is the
-  // obvious choice rather than an absent option.
+  // Model list for the template pane. Same query key as every other model
+  // picker so the list is fetched once.
   const availableModels = useAvailableModels()
-  const modelOptions = [
-    INHERIT_MODEL,
-    ...(availableModels || []).map((m: { name: string }) => m.name).filter((n: string) => n && n !== INHERIT_MODEL),
-  ]
 
   const [filter, setFilter] = useState('')
   const [view, setView] = useState<CrewView>(readStoredView)
@@ -1067,6 +1065,14 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
     queryFn: () => api.agentResolvedModel(editing),
     enabled: !!editing,
   })
+  // The pin's list is the harness's that judges it, when that is not the configured one. The
+  // template pane keeps the configured list: other crews run the same template file.
+  // INHERIT_MODEL leads so "no pin" is the obvious choice rather than an absent option.
+  const pinModelsQuery = useAvailableModelsQuery({ backend: resolved?.models_backend })
+  const modelOptions = [
+    INHERIT_MODEL,
+    ...pinModelsQuery.data.map((m: { name: string }) => m.name).filter((n: string) => n && n !== INHERIT_MODEL),
+  ]
 
   /** The model an effort level would be applied to: the pending pick when the
    *  crew pins one, otherwise whatever the inherit chain resolves to. Reading
@@ -1084,7 +1090,9 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
   const effortModel = editModel !== INHERIT_MODEL
     ? editModel
     : modelPinPendingClear ? '' : (resolved?.model || '')
-  const effortCapable = modelSupportsEffort(effortModel)
+  // The pin backend's own answer, where its build decides rather than the model.
+  const effortCapable = resolved?.effort_supported ?? modelSupportsEffort(effortModel)
+  const effortLevels: string[] | undefined = resolved?.effort_supported ? resolved.effort_levels : undefined
 
   /** Argument-free so a click event is never mistaken for one. Opens the
    *  simple create dialog (`NewCrewmateDialog`); it owns its own form state, so
@@ -2288,12 +2296,21 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
                   {pane === 'model' && (
                     <>
                       <ModelField options={modelOptions} value={editModel} onChange={setEditModel} />
+                      {/* No hand-off: the crew sheet's unsaved pane edits (dirtyPanes). Another
+                          harness's list keeps no last-good copy, so a failure leaves only Inherited. */}
+                      {(pinModelsQuery.isError || pinModelsQuery.isDegraded) && (
+                        <ErrorNotice
+                          className="mt-1"
+                          message={i18nT('pages.chatSidebar.model_list_failed')}
+                          testId="crew-editor-models-degraded"
+                        />
+                      )}
                       {/* Offered when the model the crew will actually run on
                           accepts effort — OR when a pin is already stored on a
                           model that does not, so the only way to clear a
                           stranded pin is not to first switch the model back. */}
                       {(effortCapable || !!editEffort) && (
-                        <EffortField value={editEffort} onChange={setEditEffort} />
+                        <EffortField value={editEffort} onChange={setEditEffort} levels={effortLevels} />
                       )}
                       {!effortCapable && !!editEffort && (
                         <div className="rounded-md border border-warn-subtle bg-warn-subtle px-3 py-2.5 text-[11.5px] leading-relaxed text-muted">
@@ -2303,7 +2320,9 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
                               substituting the "Inherited" label would read as
                               "Inherited does not take a reasoning effort", which
                               names no model and states nothing true. */}
-                          {effortModel
+                          {resolved?.effort_supported === false
+                            ? i18nT('pages.kiroCrewAgentsPage.effort_ignored_by_this_backend')
+                            : effortModel
                             ? i18nT('pages.kiroCrewAgentsPage.effort_ignored_on_this_model', { model: effortModel })
                             : i18nT('pages.kiroCrewAgentsPage.effort_pin_needs_a_model')}
                         </div>

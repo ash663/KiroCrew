@@ -189,9 +189,15 @@ export interface CrewEditorController {
   modelsDegraded: boolean
 
   // Derived model/effort readout.
-  resolved: { model?: string; pinned?: boolean; reasoning_effort?: string; effort_pinned?: boolean } | undefined
+  resolved: {
+    model?: string; pinned?: boolean; reasoning_effort?: string; effort_pinned?: boolean
+    /** False when the crew's agent backend takes no effort, whatever the model. */
+    effort_supported?: boolean
+  } | undefined
   resolvedError: unknown
   effortCapable: boolean
+  /** The pin backend's own levels, when it reported them. */
+  effortLevels: string[] | undefined
   effortModel: string
 
   // Sharing collisions.
@@ -364,6 +370,12 @@ export function useCrewEditor(args: UseCrewEditorArgs): CrewEditorController {
     enabled: open,
   })
 
+  const { data: resolved, error: resolvedError } = useQuery({
+    queryKey: ['agent-resolved-model', editing],
+    queryFn: () => api.agentResolvedModel(editing),
+    enabled: !!editing,
+  })
+
   // The model list surfaces a transport failure as `isDegraded` (the adapter
   // resolves with an auto-only/cached list rather than rejecting). A genuine
   // query ERROR (the fetch rejected) belongs in the shared options-load notice;
@@ -374,12 +386,15 @@ export function useCrewEditor(args: UseCrewEditorArgs): CrewEditorController {
   // field instead (see `modelsDegraded` below), not as an options-load error.
   const modelsQuery = useAvailableModelsQuery({ enabled: open })
   const availableModels = modelsQuery.data
-  const modelsDegraded = !modelsQuery.error && modelsQuery.isDegraded
-  const editorOptionsError = installedError ?? workspacesError ?? cfgError ?? modelsQuery.error
+  // The pin's list is the harness's that judges it, when that is not the configured one. The
+  // template pane keeps the configured list: other crews run the same template file.
+  const pinModelsQuery = useAvailableModelsQuery({ enabled: open, backend: resolved?.models_backend })
+  const modelsDegraded = !pinModelsQuery.error && pinModelsQuery.isDegraded
+  const editorOptionsError = installedError ?? workspacesError ?? cfgError ?? modelsQuery.error ?? pinModelsQuery.error
 
   const modelOptions = [
     INHERIT_MODEL,
-    ...(availableModels || []).map((m: { name: string }) => m.name).filter((n: string) => n && n !== INHERIT_MODEL),
+    ...(pinModelsQuery.data || []).map((m: { name: string }) => m.name).filter((n: string) => n && n !== INHERIT_MODEL),
   ]
 
   // ── Edit field state (own copies, seeded from the record on open) ──
@@ -525,16 +540,13 @@ export function useCrewEditor(args: UseCrewEditorArgs): CrewEditorController {
   }, [queryClient, editing])
 
   // ── Resolved model + effort ──
-  const { data: resolved, error: resolvedError } = useQuery({
-    queryKey: ['agent-resolved-model', editing],
-    queryFn: () => api.agentResolvedModel(editing),
-    enabled: !!editing,
-  })
   const modelPinPendingClear = editModel === INHERIT_MODEL && !!editingAgent?.model
   const effortModel = editModel !== INHERIT_MODEL
     ? editModel
     : modelPinPendingClear ? '' : (resolved?.model || '')
-  const effortCapable = modelSupportsEffort(effortModel)
+  // The pin backend's own answer, where its build decides rather than the model.
+  const effortCapable = resolved?.effort_supported ?? modelSupportsEffort(effortModel)
+  const effortLevels: string[] | undefined = resolved?.effort_supported ? resolved.effort_levels : undefined
 
   // ── Mutations ──
   const settleFor = useCallback((epoch: number, err?: string) => {
@@ -1026,6 +1038,7 @@ export function useCrewEditor(args: UseCrewEditorArgs): CrewEditorController {
     resolved,
     resolvedError,
     effortCapable,
+    effortLevels,
     effortModel,
     collidingCrews,
     sharingWorkspace,

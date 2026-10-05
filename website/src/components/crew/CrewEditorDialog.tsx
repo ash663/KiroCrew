@@ -83,7 +83,7 @@ export default function CrewEditorDialog({ ctl }: { ctl: CrewEditorController })
     editModel, setEditModel, editEffort, setEditEffort, editAvatar,
     kiroAgentOptions, workspaceOptions, modelOptions, availableModels, templateProvenance,
     templateFieldLabel, kirocrewCfg, editorOptionsError, modelsDegraded,
-    resolved, resolvedError, effortCapable, effortModel,
+    resolved, resolvedError, effortCapable, effortLevels, effortModel,
     collidingCrews, sharingWorkspace, sharingMemoryStore,
     pane, requestPane, goToPane, panelId, sections, routingWords, templatePaneActive,
     wakeJobs, wakeUnknown, boundWebhooks, webhooksUnknown,
@@ -265,11 +265,13 @@ export default function CrewEditorDialog({ ctl }: { ctl: CrewEditorController })
                     />
                   )}
                   {(effortCapable || !!editEffort) && (
-                    <EffortField value={editEffort} onChange={setEditEffort} />
+                    <EffortField value={editEffort} onChange={setEditEffort} levels={effortLevels} />
                   )}
                   {!effortCapable && !!editEffort && (
                     <div className="rounded-md border border-warn-subtle bg-warn-subtle px-3 py-2.5 text-[11.5px] leading-relaxed text-muted">
-                      {effortModel
+                      {resolved?.effort_supported === false
+                        ? i18nT('pages.kiroCrewAgentsPage.effort_ignored_by_this_backend')
+                        : effortModel
                         ? i18nT('pages.kiroCrewAgentsPage.effort_ignored_on_this_model', { model: effortModel })
                         : i18nT('pages.kiroCrewAgentsPage.effort_pin_needs_a_model')}
                     </div>

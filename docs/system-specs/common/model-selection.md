@@ -335,15 +335,28 @@ its own once the cache refreshes with a list that carries it.
   provider/model ids) without substituting the Kiro CLI catalog. A cold cache
   offers `auto` and a scoped configured default until that backend advertises
   its choices.
+- A session or crew on another harness than `agent.acp_backend` lists that
+  harness's models. `selection-capabilities` (the composer, split panes and the
+  model-cycle shortcut) and `GET /api/agents/resolved-model` (the crew editor,
+  for the backend that judges the crew's pin) report `models_backend` when it
+  reads another model-id namespace, and the picker asks
+  `GET /api/models?backend=<id>`. kiro-cli and kas share one namespace, so a kas
+  session keeps the configured list.
 - The chat composer reads `GET /api/chat/slots/{slot}/selection-capabilities` for
   the active ACP session's backend, effort support, and ordered effort levels. A
-  missing session answers `known: false`; the composer then uses its existing
-  model-name heuristic until ACP reports the session's actual options. A slot the
-  gateway has not registered yet answers 404 `slot_not_found`, and the composer
-  reads that the same way (`selectionCapabilitiesFailed` in `website/src/lib/effort.ts`):
-  only a real fault (403, 503 `peer_unavailable`, transport failure) shows the
-  "could not verify effort options" notice and hides the effort control. The same
-  endpoint proxies a remote slot to its execution peer. Model and effort are ONE
+  missing session answers `known: false`, with `effort_supported` and
+  `effort_levels` for the slot's own harness: where the level rides the model
+  (kiro-cli, claude) the model the slot will run decides, over the shared
+  vocabulary; where the harness carries it in a session option (pi) or a model
+  pair (codex) a live session on that harness answers, and none means no effort
+  row. The composer uses that answer until ACP reports the session's actual
+  options; `resolved-model` gives the crew editor's Effort field the same
+  harness answer. A slot the gateway has not registered yet answers 404
+  `slot_not_found`, and the composer reads that the same way
+  (`selectionCapabilitiesFailed` in `website/src/lib/effort.ts`): only a real
+  fault (403, 503 `peer_unavailable`, transport failure) shows the "could not
+  verify effort options" notice and hides the effort control. The same endpoint
+  proxies a remote slot to its execution peer. Model and effort are ONE
   composer control (`docs/decisions/2026-06-14-chat-composer-model-and-effort-are-one-control.md`):
   the model chip names the level in force, and the model picker embeds the effort
   slider below its model list whenever the capability read reports support, offering
@@ -352,7 +365,8 @@ its own once the cache refreshes with a list that carries it.
   effort support gets no effort row inside the picker. The composer never grows a
   second, standalone effort control.
 - Codex advertises `model[effort]` pairs, but its `model` config option accepts the
-  base ID and its `reasoning_effort` option accepts the level. The live capability
+  base ID and its `reasoning_effort` option accepts the level, so a build that
+  advertises no `reasoning_effort` option reports no effort support. The live capability
   marks only backends in `ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS` for pair grouping;
   before the session exists, the configured backend ID supplies the same Codex
   fallback. The pair shape alone is never sufficient. Existing pair pins display

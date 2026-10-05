@@ -12384,6 +12384,7 @@
       "edit_model": "编辑默认模型",
       "edit_reasoning_effort": "编辑推理强度",
       "effort_ignored_on_this_model": "{{model}} 不接受推理强度，所以用这个模型时该设置会被忽略。清除它，或换一个会推理的模型。",
+      "effort_ignored_by_this_backend": "这个队友的代理后端不接受推理强度，所以该设置会被忽略。请清除它。",
       "effort_inherited_from_the_global_default": "取自你的默认设置。",
       "effort_needs_a_model": "没选模型就没有推理强度：在上面选一个，或设一个默认模型。",
       "effort_pin_needs_a_model": "没选模型前这个强度会被忽略：在上面选一个，或设一个默认模型。",

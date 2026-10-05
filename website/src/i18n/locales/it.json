@@ -12756,6 +12756,7 @@
       "edit_model": "Modifica il modello predefinito",
       "edit_reasoning_effort": "Modifica il livello di ragionamento",
       "effort_ignored_on_this_model": "{{model}} non accetta un livello di ragionamento, quindi questo viene ignorato finché quel modello è in uso. Cancellalo, o scegli un modello che ragiona.",
+      "effort_ignored_by_this_backend": "Il backend dell’agente di questo compagno non accetta un livello di ragionamento, quindi questo viene ignorato. Rimuovilo.",
       "effort_inherited_from_the_global_default": "preso dalla tua impostazione predefinita.",
       "effort_needs_a_model": "Nessun livello di ragionamento finché non si sceglie un modello: scegline uno sopra, o imposta un predefinito.",
       "effort_pin_needs_a_model": "Questo livello viene ignorato finché non si sceglie un modello: scegline uno sopra, o imposta un predefinito.",
