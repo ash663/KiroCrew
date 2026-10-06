@@ -31,6 +31,9 @@ const KIRO_ROWS = [{ model_name: 'auto' }, { model_name: 'claude-fable-5.1', des
 const CLAUDE_ROWS = [{ model_name: 'auto' }, { model_name: 'global.anthropic.claude-opus-5-5[1m]' }]
 const models = api.models as unknown as ReturnType<typeof vi.fn>
 
+/** The roster's list is fetched under the backend's own key once `modelsBackend` names it. */
+const BACKEND_LIST = { timeout: 5000 }
+
 beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
@@ -84,14 +87,14 @@ describe('useSessionRosters', () => {
   it('offers a claude session claude\'s models under a kiro-cli default', async () => {
     const { result } = rosters('claude')
 
-    await waitFor(() => expect(result.current.effectiveModels.map(m => m.name)).toContain('global.anthropic.claude-opus-5-5[1m]'))
+    await waitFor(() => expect(result.current.effectiveModels.map(m => m.name)).toContain('global.anthropic.claude-opus-5-5[1m]'), BACKEND_LIST)
     expect(result.current.effectiveModels.map(m => m.name)).not.toContain('claude-fable-5.1')
   })
 
   it('keeps the configured list for a session on the configured backend', async () => {
     const { result } = rosters(undefined)
 
-    await waitFor(() => expect(result.current.effectiveModels.map(m => m.name)).toContain('claude-fable-5.1'))
+    await waitFor(() => expect(result.current.effectiveModels.map(m => m.name)).toContain('claude-fable-5.1'), BACKEND_LIST)
     expect(models).not.toHaveBeenCalledWith('claude')
   })
 
@@ -102,7 +105,7 @@ describe('useSessionRosters', () => {
       : Promise.resolve(KIRO_ROWS)))
     const { result } = rosters('claude')
 
-    await waitFor(() => expect(result.current.ownModelsFailed).toBe(true))
+    await waitFor(() => expect(result.current.ownModelsFailed).toBe(true), BACKEND_LIST)
   })
 })
 

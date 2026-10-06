@@ -23,7 +23,8 @@ export function createChatSlotSettingsEndpoints({ post, j }: ClientTransport) {
       fetch('/api/chat/slots/' + encodeURIComponent(slot) + '/selection-capabilities').then(j) as Promise<{
         known: boolean
         backend?: string
-        effort_supported?: boolean
+        /** `null` before a session reports, where only a live session on its harness can say. */
+        effort_supported?: boolean | null
         effort_levels?: string[]
         model_effort_pair_ids?: boolean
         /** Present when this session's harness lists other models than the configured backend. */

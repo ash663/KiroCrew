@@ -34,7 +34,7 @@ interface ComposerChipsOptions {
   selectionCapabilitiesQ: {
     isError: boolean
     error?: unknown
-    data?: { models_backend?: string; effort_supported?: boolean; effort_levels?: string[] }
+    data?: { models_backend?: string; effort_supported?: boolean | null; effort_levels?: string[] }
   }
   remoteCrew: ReturnType<typeof useRemoteCapabilities>
   dispatch: AppDispatch
@@ -134,9 +134,10 @@ export function useComposerChips({
     // a bare `auto` for a session running one specific model.
     codexPairModels ? modelWithoutEffort(currentSlot?.served_model || '') : currentSlot?.served_model,
   )
-  // Before a session reports, its own harness answers when the server gave one.
+  // Before a session reports, its own harness answers when the server gave one. A null answer is
+  // "no session on that harness has said yet", so the model answers then, as in the crew editor.
   const effortCaps = selectionCapabilities
-    ?? (selectionCapabilitiesQ.data?.effort_supported === undefined ? undefined : selectionCapabilitiesQ.data)
+    ?? (selectionCapabilitiesQ.data?.effort_supported == null ? undefined : selectionCapabilitiesQ.data)
   const effortSupported = provider.capabilities.reasoningEffort && !selectionCapabilitiesFailed(selectionCapabilitiesQ) && (
     effortCaps
       ? effortCaps.effort_supported === true

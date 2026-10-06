@@ -7805,9 +7805,12 @@ async def _configured_backend_for_slot(slot: _ChatSlot) -> str:
     )
 
 
-async def _own_models_field(backend: str) -> dict[str, str]:
-    """``models_backend`` for a slot on *backend*, when its pickers need that backend's list."""
-    config = await asyncio.to_thread(KiroCrewConfig.load)
+async def _own_models_field(backend: str, config: Any = None) -> dict[str, str]:
+    """``models_backend`` for a slot on *backend*, when its pickers need that backend's list.
+
+    *config* is the caller's already-loaded one, so the cold path reads it once.
+    """
+    config = config if config is not None else await asyncio.to_thread(KiroCrewConfig.load)
     own = own_models_backend(backend, config.agent.acp_backend)
     return {} if own is None else {"models_backend": own}
 
@@ -7903,20 +7906,19 @@ async def api_chat_slot_selection_capabilities(request: web.Request) -> web.Resp
         # still knows whether model IDs encode effort, so the picker can render
         # the base rows while live effort options are pending.
         backend = await _configured_backend_for_slot(slot)
-        effort = harness_effort(state, backend, None)
-        if not effort:
-            # The level rides the model here: the slot's pick, else what its crew resolves to.
-            config = await asyncio.to_thread(KiroCrewConfig.load)
-            model = slot.model or await asyncio.to_thread(
-                resolve_effective_model, config, slot.agent or None
-            )
-            effort = harness_effort(state, backend, model)
+        # The model this slot will run: its own pick, else what its crew resolves to. What
+        # answers for effort where the level rides the model, and the pair a pair-id harness
+        # judges when only another session's build says the option exists.
+        config = await asyncio.to_thread(KiroCrewConfig.load)
+        model = slot.model or await asyncio.to_thread(
+            resolve_effective_model, config, slot.agent or None
+        )
         return web.json_response(
             {
                 "known": False,
                 "model_effort_pair_ids": backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS,
-                **await _own_models_field(backend),
-                **effort,
+                **await _own_models_field(backend, config),
+                **harness_effort(state, backend, model, slot.agent or ""),
             }
         )
     backend = provider.capabilities.backend

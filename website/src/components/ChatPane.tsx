@@ -93,6 +93,7 @@ import { slotApprovalMode } from '../utils/slotApprovalMode'
 
 import { i18nT } from '../i18n/t'
 import { fetchDashboardConfig } from '../api/dashboardConfigQuery'
+import { acpBackendName } from '../api/acpBackend'
 
 /**
  * ChatPane — one live chat session in the native session grid.
@@ -675,9 +676,10 @@ export default function ChatPane({
     paneSlot?.model_withheld,
     codexPairModels ? modelWithoutEffort(paneSlot?.served_model || '') : paneSlot?.served_model || '',
   )
-  // Before a session reports, its own harness answers when the server gave one.
+  // Before a session reports, its own harness answers when the server gave one. A null answer is
+  // "no session on that harness has said yet", so the model answers then, as in the crew editor.
   const effortCaps = selectionCapabilities
-    ?? (selectionCapabilitiesQ.data?.effort_supported === undefined ? undefined : selectionCapabilitiesQ.data)
+    ?? (selectionCapabilitiesQ.data?.effort_supported == null ? undefined : selectionCapabilitiesQ.data)
   const effortSupported = provider.capabilities.reasoningEffort && !selectionCapabilitiesFailed(selectionCapabilitiesQ) && (
     effortCaps
       ? effortCaps.effort_supported === true
@@ -2152,7 +2154,9 @@ export default function ChatPane({
                 <ErrorNotice
                   className="min-w-0 flex-1"
                   variant="inline"
-                  message={paneRemoteCrew.failed ? i18nT('components.modelEffortDropdown.models_failed') : i18nT('pages.chatSidebar.model_list_failed')}
+                  message={paneRemoteCrew.failed
+                    ? i18nT('components.modelEffortDropdown.models_failed')
+                    : i18nT('components.modelEffortDropdown.harness_models_failed', { harness: acpBackendName({ id: selectionCapabilitiesQ.data?.models_backend ?? '' }) })}
                 />
                 <Btn
                   type="button"

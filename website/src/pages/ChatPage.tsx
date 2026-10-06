@@ -336,6 +336,7 @@ import { i18nT } from '../i18n/t'
 import { fmtDateFields } from '../i18n/format'
 import { fmtMessageTime, fmtMessageTimeFull } from './chat/messageTime'
 import { fetchDashboardConfig } from '../api/dashboardConfigQuery'
+import { acpBackendName } from '../api/acpBackend'
 
 /**
  * Horizontal room the chat pane reclaims (negative margin) while the desktop
@@ -6428,7 +6429,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 onSelectModel={pickModel}
                 modelsLoading={remoteCrew.modelsPending}
                 modelsFailed={remoteCrew.failed || ownModelsFailed}
-                modelsFailedMessage={remoteCrew.failed ? undefined : i18nT('pages.chatSidebar.model_list_failed')}
+                modelsFailedMessage={remoteCrew.failed ? undefined : i18nT('components.modelEffortDropdown.harness_models_failed', { harness: acpBackendName({ id: selectionCapabilitiesQ.data?.models_backend ?? '' }) })}
                 retryingModels={remoteCrew.failed ? remoteCrew.retrying : ownModelsQuery.isFetching}
                 onRetryModels={() => (remoteCrew.failed ? remoteCrew.refetch() : ownModelsQuery.refetch())}
                 filter={modelFilter}

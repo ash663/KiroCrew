@@ -21,7 +21,7 @@ vi.mock('../api/client', () => ({
 import { useComposerChips } from '../pages/chat/page/composerChips'
 import type { ChatSlot } from '../types'
 
-type Caps = { known: boolean; effort_supported?: boolean; effort_levels?: string[] }
+type Caps = { known: boolean; effort_supported?: boolean | null; effort_levels?: string[] }
 
 function chips(caps: Caps, model = '') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -32,7 +32,7 @@ function chips(caps: Caps, model = '') {
     pendingAgent: '',
     installedAgents: [],
     provider: { id: 'acp', capabilities: { reasoningEffort: true }, resolveModel: vi.fn().mockResolvedValue(''), resolveDefaultEffort: vi.fn().mockResolvedValue('') } as never,
-    availableModels: [{ name: 'auto', description: '' }, { name: 'claude-opus-5-5', description: '' }],
+    availableModels: [{ name: 'auto', description: '' }, { name: 'claude-opus-5-5', description: '' }, { name: 'openai.gpt-6.1-sol', description: '' }],
     codexPairModels: false,
     selectionCapabilities: undefined,
     selectionCapabilitiesQ: { isError: false, data: caps },
@@ -49,6 +49,14 @@ describe('useComposerChips — effort before the session reports', () => {
 
     expect(result.current.effortSupported).toBe(true)
     expect(result.current.effortLevelsOverride).toEqual(['low', 'high'])
+  })
+
+  it('judges the model where no session on the harness has answered yet, as before a session reports', () => {
+    // A cold codex thread: unknown is not "takes none", so its pick is not lost before its first turn.
+    const { result } = chips({ known: false, effort_supported: null, effort_levels: [] }, 'openai.gpt-6.1-sol')
+
+    expect(result.current.effortSupported).toBe(true)
+    expect(result.current.effortLevelsOverride).toBeUndefined()
   })
 
   it('offers no control where the harness takes no effort, whatever the model name says', () => {

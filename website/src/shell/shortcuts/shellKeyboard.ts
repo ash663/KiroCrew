@@ -17,15 +17,19 @@ import { useAutoConnectInstances } from '../../hooks/useAutoConnectInstances'
 import { useCommandPalette } from '../../hooks/useCommandPalette'
 import { useProvider } from '../../providers/context'
 import { modelsQueryKey } from '../../hooks/useAvailableModels'
+import { i18nT } from '../../i18n/t'
+import { modelSupportsEffort } from '../../lib/effort'
 import { useAgents } from '../../hooks/useAgents'
 
 const REASONING_EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max']
 
-/** What an effort cycle steps over on *slot*: its harness's levels, '' (default) first, or null
- *  when that harness takes none (see the composer's effort control). */
-function sessionEffortLevels(queryClient: QueryClient, slot: string): string[] | null {
-  const caps = queryClient.getQueryData<{ effort_supported?: boolean; effort_levels?: string[] }>(['slot-selection-capabilities', slot])
-  if (caps?.effort_supported === false) return null
+/** What an effort cycle steps over on *slot*, which runs *model*: its harness's levels, '' (default)
+ *  first, or the notice saying there are none (see the composer's effort control). */
+function sessionEffortLevels(queryClient: QueryClient, slot: string, model: string): string[] | string {
+  const caps = queryClient.getQueryData<{ effort_supported?: boolean | null; effort_levels?: string[] }>(['slot-selection-capabilities', slot])
+  // null is "no live session on that harness has said yet": the model answers, as in the composer.
+  const supported = caps?.effort_supported === null ? modelSupportsEffort(model) : caps?.effort_supported !== false
+  if (!supported) return i18nT('pages.chatPage.effort_cycle_unavailable')
   const levels = caps?.effort_levels?.filter(l => l && l !== 'default')
   return levels?.length ? ['', ...levels] : REASONING_EFFORT_LEVELS
 }
@@ -76,6 +80,9 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
   const refreshTrigger = useAppSelector(s => s.dashboard.refreshTrigger)
   const { agents: installedAgents, defaultAgent } = useAgents(refreshTrigger)
   const provider = useProvider()
+  // The model a slot runs before it reports: its own pick, else what the composer resolved its crew to.
+  const slotModel = (slot: { model?: string; agent?: string } | undefined) => slot?.model
+    || queryClient.getQueryData<string>(['resolved-model', slot?.agent || defaultAgent || 'default', provider.id]) || ''
   const agentSwitchNotice = useAppSelector(s => s.chat.agentSwitchNotice)
   useEffect(() => {
     if (!agentSwitchNotice) return
@@ -130,8 +137,9 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
       // is a REAL effort target (provider default), so this base uses the
       // null-aware accessor — the ''-falsy one would misread an in-flight
       // "back to default" as "nothing pending" and mis-step the burst.
-      const levels = sessionEffortLevels(queryClient, activeSlot)
-      if (!levels) return
+      const levels = sessionEffortLevels(queryClient, activeSlot, slotModel(currentSlot))
+      // A shortcut that silently does nothing reads as broken, so say why instead.
+      if (typeof levels === 'string') { store.dispatch(setAgentSwitchNotice(levels)); return }
       const base = pendingSlotSwitchTarget('reasoning_effort', activeSlot)
         ?? (currentSlot?.reasoning_effort || '')
       const idx = levels.indexOf(base)
@@ -156,8 +164,9 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
       const slots = store.getState().dashboard.slots
       const currentSlot = slots.find((s: { key: string }) => s.key === activeSlot)
       // See onCycleReasoningEffort above.
-      const levels = sessionEffortLevels(queryClient, activeSlot)
-      if (!levels) return
+      const levels = sessionEffortLevels(queryClient, activeSlot, slotModel(currentSlot))
+      // A shortcut that silently does nothing reads as broken, so say why instead.
+      if (typeof levels === 'string') { store.dispatch(setAgentSwitchNotice(levels)); return }
       const base = pendingSlotSwitchTarget('reasoning_effort', activeSlot)
         ?? (currentSlot?.reasoning_effort || '')
       const idx = levels.indexOf(base)

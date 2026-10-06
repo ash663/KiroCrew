@@ -112,6 +112,8 @@ class TestSlotSelectionCapabilities:
             "load",
             load_config,
         )
+        # The cold answer reads the model this slot will run; the stub config resolves none.
+        monkeypatch.setattr(chat_handlers, "resolve_effective_model", lambda _cfg, _agent: "")
         state = _mock_state(_ChatSlot("test"))
         async with TestClient(TestServer(_make_app(state))) as client:
             resp = await client.get("/api/chat/slots/test/selection-capabilities")
@@ -121,7 +123,7 @@ class TestSlotSelectionCapabilities:
         assert data == {
             "known": False,
             "model_effort_pair_ids": True,
-            "effort_supported": False,
+            "effort_supported": None,
             "effort_levels": [],
         }
 
@@ -134,6 +136,7 @@ class TestSlotSelectionCapabilities:
                 agent=SimpleNamespace(acp_backend="claude", member_acp_backend="codex")
             ),
         )
+        monkeypatch.setattr(chat_handlers, "resolve_effective_model", lambda _cfg, _agent: "")
         state = _mock_state(_ChatSlot("member-test"))
         async with TestClient(TestServer(_make_app(state))) as client:
             resp = await client.get("/api/chat/slots/member-test/selection-capabilities")
@@ -144,7 +147,7 @@ class TestSlotSelectionCapabilities:
             "known": False,
             "model_effort_pair_ids": True,
             "models_backend": "codex",
-            "effort_supported": False,
+            "effort_supported": None,
             "effort_levels": [],
         }
 

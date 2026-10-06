@@ -7,6 +7,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppDispatch } from '../store'
 import { createSlot } from '../store/chatSlice'
 import { api, type WebhookTokenEntry } from '../api/client'
+import { acpBackendName } from '../api/acpBackend'
 import { useAvailableModels, useAvailableModelsQuery } from '../hooks/useAvailableModels'
 import { FOLDER_COLOR_PALETTE } from '../components/folderColorCatalog'
 import { Btn, SendBtn, Input, Badge, SearchInput, PageHeader, EmptyState } from '../components/ui'
@@ -469,19 +470,37 @@ export function MemoryStoreField({ value = '', member, memoryState = 'unavailabl
   )
 }
 
-export function ModelField({ options, value, onChange, hint }: {
+export function ModelField({ options, value, onChange, hint, servedAs, harness = '' }: {
   options: string[]; value: string; onChange: (v: string) => void; hint?: string
+  /** The id the crew's harness serves a stored pin `options` lacks as, `''` for none
+   *  (`resolved-model`'s `pin_served_as`). Omitted while no live session has said. */
+  servedAs?: string
+  /** That harness's name, for a pin it does not offer. */
+  harness?: string
 }) {
+  // A stored pin spelled as another harness spells it is the row it runs as, not a second row for
+  // the same model: two rows read as two models, and the readout below still names the stored id.
+  const folded = servedAs !== undefined && servedAs !== value && options.includes(servedAs)
+  const shown = folded ? options : withCurrent(options, value)
+  // Otherwise the off-list pin says what this harness does with it.
+  const offList = !folded && servedAs !== undefined && servedAs !== value && !options.includes(value)
+  const label = (m: string) => {
+    if (m === INHERIT_MODEL) return i18nT('pages.kiroCrewAgentsPage.inherited')
+    if (m !== value || !offList) return m
+    return servedAs
+      ? i18nT('pages.kiroCrewAgentsPage.pin_runs_as', { model: m, served: servedAs })
+      : i18nT('pages.kiroCrewAgentsPage.pin_not_offered', { model: m, harness })
+  }
   return (
     <Field label={i18nT('pages.kiroCrewAgentsPage.model')} hint={hint}>
       <SimpleSelect
-        options={withCurrent(options, value)}
+        options={shown}
         // The inherit option must NOT read as "auto": in the chat picker "auto"
         // promises task-based routing, whereas here it means "pin nothing,
         // inherit the next tier" — which can resolve to a concrete model. Label
         // it as the card does so the round trip stays honest.
-        optionLabels={withCurrent(options, value).map(m => (m === INHERIT_MODEL ? i18nT('pages.kiroCrewAgentsPage.inherited') : m))}
-        value={value}
+        optionLabels={shown.map(label)}
+        value={folded ? servedAs : value}
         onChange={onChange}
         aria-label={i18nT('pages.kiroCrewAgentsPage.edit_model')}
       />
@@ -1073,6 +1092,7 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
     INHERIT_MODEL,
     ...pinModelsQuery.data.map((m: { name: string }) => m.name).filter((n: string) => n && n !== INHERIT_MODEL),
   ]
+  const pinHarness = acpBackendName({ id: resolved?.models_backend ?? kirocrewCfg?.agent?.acp_backend ?? '' })
 
   /** The model an effort level would be applied to: the pending pick when the
    *  crew pins one, otherwise whatever the inherit chain resolves to. Reading
@@ -2295,15 +2315,28 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
 
                   {pane === 'model' && (
                     <>
-                      <ModelField options={modelOptions} value={editModel} onChange={setEditModel} />
+                      <ModelField
+                        options={modelOptions}
+                        value={editModel}
+                        onChange={setEditModel}
+                        servedAs={editModel === editingAgent?.model ? resolved?.pin_served_as : undefined}
+                        harness={pinHarness}
+                      />
                       {/* No hand-off: the crew sheet's unsaved pane edits (dirtyPanes). Another
                           harness's list keeps no last-good copy, so a failure leaves only Inherited. */}
                       {(pinModelsQuery.isError || pinModelsQuery.isDegraded) && (
-                        <ErrorNotice
-                          className="mt-1"
-                          message={i18nT('pages.chatSidebar.model_list_failed')}
-                          testId="crew-editor-models-degraded"
-                        />
+                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                          <ErrorNotice
+                            className="min-w-[12rem] flex-1"
+                            message={resolved?.models_backend === undefined
+                              ? i18nT('pages.chatSidebar.model_list_failed')
+                              : i18nT('pages.kiroCrewAgentsPage.harness_models_failed', { harness: pinHarness })}
+                            testId="crew-editor-models-degraded"
+                          />
+                          <Btn type="button" className="shrink-0" onClick={() => pinModelsQuery.refetch()} disabled={pinModelsQuery.isFetching}>
+                            {i18nT('pages.chatSidebar.retry')}
+                          </Btn>
+                        </div>
                       )}
                       {/* Offered when the model the crew will actually run on
                           accepts effort — OR when a pin is already stored on a
@@ -2321,7 +2354,7 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
                               "Inherited does not take a reasoning effort", which
                               names no model and states nothing true. */}
                           {resolved?.effort_supported === false
-                            ? i18nT('pages.kiroCrewAgentsPage.effort_ignored_by_this_backend')
+                            ? i18nT('pages.kiroCrewAgentsPage.effort_ignored_by_this_backend', { harness: pinHarness })
                             : effortModel
                             ? i18nT('pages.kiroCrewAgentsPage.effort_ignored_on_this_model', { model: effortModel })
                             : i18nT('pages.kiroCrewAgentsPage.effort_pin_needs_a_model')}

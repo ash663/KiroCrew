@@ -3,7 +3,7 @@
  * with no last-good copy. When that list fails to load, the pane's picker says so instead of
  * offering only Auto as if Auto were the whole list.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import type { ReactNode } from 'react'
 import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react'
 import type { RootState } from '../store'
@@ -30,7 +30,9 @@ vi.mock('../api/client', () => ({
     dashboardConfig: vi.fn().mockResolvedValue({}),
     models: vi.fn((backend?: string) => (backend === 'claude'
       ? Promise.reject(new Error('Service Unavailable'))
-      : Promise.resolve([{ model_name: 'auto' }, { model_name: 'claude-fable-5.1' }]))),
+      : Promise.resolve(backend === 'codex'
+        ? [{ model_name: 'auto' }, { model_name: 'openai.gpt-6.1-sol' }]
+        : [{ model_name: 'auto' }, { model_name: 'claude-fable-5.1' }]))),
     agents: vi.fn().mockResolvedValue([]),
     agentDetail: vi.fn().mockResolvedValue({}),
     workspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
@@ -50,14 +52,19 @@ Object.defineProperty(window, 'matchMedia', {
 })
 
 import ChatPane from '../components/ChatPane'
+import { api } from '../api/client'
 
-function renderPane(slotKey: string) {
+/** The pane's list arrives through a chain: selection-capabilities names the session's harness, then
+ *  that harness's model list loads and fails. */
+const HARNESS_CHAIN = { timeout: 5000 }
+
+function renderPane(slotKey: string, model = 'claude-opus-5-5') {
   const store = configureStore({
     reducer: { dashboard: dashboardReducer, chat: chatReducer, notifications: notificationsReducer },
     preloadedState: {
       dashboard: {
         status: null, connected: true,
-        slots: [{ key: slotKey, messages: 0, running: false, mode: '', agent: 'helper', model: 'claude-opus-5-5', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }],
+        slots: [{ key: slotKey, messages: 0, running: false, mode: '', agent: 'helper', model, pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }],
         unreadSlots: [], refreshTrigger: 0, approvalMode: 'normal',
         subagentRunning: {}, subagentDetails: {}, subagentText: {},
       } as unknown as RootState['dashboard'],
@@ -80,11 +87,28 @@ function renderPane(slotKey: string) {
 describe('ChatPane model picker — the session\'s own list', () => {
   it('says so when the list of the harness the pane runs on fails to load', async () => {
     renderPane('member-helper')
-    const chip = await waitFor(() => screen.getByTitle(/^Model: claude-opus-5-5(?: ·|$)/))
+    const chip = await waitFor(() => screen.getByTitle(/^Model: claude-opus-5-5(?: ·|$)/), HARNESS_CHAIN)
 
     await act(async () => { fireEvent.click(chip) })
     const menu = await waitFor(() => screen.getByRole('dialog', { name: 'Model list' }))
 
-    expect(await within(menu).findByRole('alert')).toHaveTextContent("Couldn't load the model list")
+    expect(await within(menu).findByRole('alert', {}, HARNESS_CHAIN)).toHaveTextContent('Couldn\'t load Claude Code\'s models, so only “auto” is offered.')
+  })
+})
+
+describe('ChatPane effort control — a crewmate thread before its first turn', () => {
+  const caps = vi.mocked(api.chatSlotSelectionCapabilities)
+  afterEach(() => { caps.mockResolvedValue({ known: false, models_backend: 'claude' } as never) })
+
+  it('keeps it where no session on the thread\'s harness has answered yet, judging the model', async () => {
+    // Crew threads are never eager-spawned, so a codex one is cold, and unknown is not "takes none".
+    caps.mockResolvedValue({ known: false, models_backend: 'codex', effort_supported: null, effort_levels: [] } as never)
+    renderPane('member-helper', 'openai.gpt-6.1-sol')
+    const chip = await waitFor(() => screen.getByTitle(/^Model: openai\.gpt-6\.1-sol(?: ·|$)/), HARNESS_CHAIN)
+
+    await act(async () => { fireEvent.click(chip) })
+    const menu = await waitFor(() => screen.getByRole('dialog', { name: 'Model list' }))
+
+    expect(await within(menu).findByRole('slider', { name: 'Reasoning effort' }, HARNESS_CHAIN)).toBeInTheDocument()
   })
 })

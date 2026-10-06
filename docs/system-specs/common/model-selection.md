@@ -341,17 +341,32 @@ its own once the cache refreshes with a list that carries it.
   for the backend that judges the crew's pin) report `models_backend` when it
   reads another model-id namespace, and the picker asks
   `GET /api/models?backend=<id>`. kiro-cli and kas share one namespace, so a kas
-  session keeps the configured list.
+  session keeps the configured list. That list keeps no last-good copy, so when
+  it fails to load the picker names the harness, says only `auto` (Inherited in
+  the crew editor) is offered, and offers Retry. `resolved-model` also reports
+  `pin_served_as`: the id a live session on that harness serves the crew's own
+  pin as (`""` for none), absent while no session has advertised a list. The crew
+  editor shows a stored pin the harness serves as one of its own rows AS that row,
+  rather than listing one model twice, and labels a pin no row carries as running
+  as that id, or as not offered by the harness.
 - The chat composer reads `GET /api/chat/slots/{slot}/selection-capabilities` for
   the active ACP session's backend, effort support, and ordered effort levels. A
   missing session answers `known: false`, with `effort_supported` and
   `effort_levels` for the slot's own harness: where the level rides the model
   (kiro-cli, claude) the model the slot will run decides, over the shared
   vocabulary; where the harness carries it in a session option (pi) or a model
-  pair (codex) a live session on that harness answers, and none means no effort
-  row. The composer uses that answer until ACP reports the session's actual
-  options; `resolved-model` gives the crew editor's Effort field the same
-  harness answer. A slot the gateway has not registered yet answers 404
+  pair (codex) a live session on that harness answers, the crew's own first, but
+  only for its BUILD (whether it advertises the effort option, and at which
+  levels), since its own answer judges the model IT runs, which a slot pick can
+  make another -- so a pair-id harness judges this slot's or crew's model itself.
+  With no live session on that harness `effort_supported` is `null`: unknown, not
+  unsupported. On `null` the composer, split panes and effort-cycle shortcut judge
+  the model the slot will run, as before a session reports, so a cold crewmate
+  thread keeps its control; on `false` they offer none, and the shortcut says the
+  session takes no effort rather than doing nothing. `resolved-model` gives the
+  crew editor's Effort field the same harness answer, and nothing where the level
+  rides the model, which the editor judges itself as the user picks one; so it
+  says the harness takes no effort only on a definite `false`. A slot the gateway has not registered yet answers 404
   `slot_not_found`, and the composer reads that the same way
   (`selectionCapabilitiesFailed` in `website/src/lib/effort.ts`): only a real
   fault (403, 503 `peer_unavailable`, transport failure) shows the "could not
