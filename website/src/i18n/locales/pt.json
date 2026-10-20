@@ -6530,6 +6530,7 @@
       "gateway_tools_failed": "As ferramentas do {{productName}} não iniciaram nesta sessão. Inicie uma nova sessão para tentar novamente.",
       "gateway_tools_sent": "Enviadas (o harness não informa o status)",
       "gateway_tools_not_sent": "As ferramentas do {{productName}} não foram enviadas a esta sessão, e não há como adicioná-las por aqui.",
+      "gateway_tools_no_tools": "As ferramentas do {{productName}} iniciaram nesta sessão, mas não forneceram nenhuma ferramenta, muitas vezes porque outro servidor usa os mesmos nomes de ferramenta.",
       "gateway_tools_pending": "Ainda sem relatório",
       "gateway_tools_missing": "Esta sessão não tem as ferramentas do {{productName}}",
       "gateway_tools_missing_short": "Sem ferramentas",

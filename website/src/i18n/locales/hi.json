@@ -6418,6 +6418,7 @@
       "gateway_tools_failed": "इस सत्र में {{productName}} टूल शुरू नहीं हो सके। फिर से कोशिश करने के लिए नया सत्र शुरू करें।",
       "gateway_tools_sent": "भेजे गए (हार्नेस स्थिति नहीं बताता)",
       "gateway_tools_not_sent": "इस सत्र को {{productName}} टूल नहीं भेजे गए, और यहाँ से उन्हें जोड़ा नहीं जा सकता।",
+      "gateway_tools_no_tools": "इस सत्र में {{productName}} टूल शुरू हुए पर कोई टूल नहीं दिया, अक्सर इसलिए कि कोई दूसरा सर्वर वही टूल नाम इस्तेमाल करता है।",
       "gateway_tools_pending": "अभी रिपोर्ट नहीं हुई",
       "gateway_tools_missing": "इस सत्र में {{productName}} टूल नहीं हैं",
       "gateway_tools_missing_short": "टूल नहीं",

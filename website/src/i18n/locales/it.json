@@ -6530,6 +6530,7 @@
       "gateway_tools_failed": "Gli strumenti di {{productName}} non si sono avviati in questa sessione. Avvia una nuova sessione per riprovare.",
       "gateway_tools_sent": "Inviati (l’harness non ne riporta lo stato)",
       "gateway_tools_not_sent": "Gli strumenti di {{productName}} non sono stati inviati a questa sessione, e da qui non puoi aggiungerli.",
+      "gateway_tools_no_tools": "Gli strumenti di {{productName}} si sono avviati in questa sessione ma non le hanno dato alcuno strumento, spesso perché un altro server usa gli stessi nomi di strumento.",
       "gateway_tools_pending": "Non ancora segnalati",
       "gateway_tools_missing": "Questa sessione non ha gli strumenti di {{productName}}",
       "gateway_tools_missing_short": "Nessuno strumento",

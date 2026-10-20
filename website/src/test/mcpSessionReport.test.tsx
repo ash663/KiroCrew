@@ -275,6 +275,12 @@ describe('gatewayToolsState', () => {
     ['kiro', report({ ready: ['kirocrew-core'] }), 'pending'],
     ['kas', report(), 'pending'],
     ['kiro', report({ failed: ['kirocrew-core'] }), 'failed'],
+    // Started but gave the session no tools: not `connected`, on any harness.
+    ['kiro', report({ ready: controlPlane, no_tools: ['kirocrew-core'] }), 'no_tools'],
+    ['claude', report({ configured: controlPlane, ready: controlPlane, no_tools: ['kirocrew-cron'] }), 'no_tools'],
+    // A server outside the control plane that gave no tools changes nothing here.
+    ['kiro', report({ ready: controlPlane, no_tools: ['other'] }), 'connected'],
+    ['kiro', report({ failed: ['kirocrew-core'], no_tools: ['kirocrew-cron'] }), 'failed'],
   ] as const)('reads backend %j with %j as %s', (backend, r, expected) => {
     expect(gatewayToolsState(r, backend)).toBe(expected)
   })

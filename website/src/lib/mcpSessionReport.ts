@@ -38,13 +38,14 @@ export function mcpSessionServerState(
 }
 
 /** Whether a session received Kiro Crew's own MCP servers. */
-export type GatewayToolsState = 'connected' | 'failed' | 'sent' | 'not_sent' | 'pending'
+export type GatewayToolsState = 'connected' | 'failed' | 'no_tools' | 'sent' | 'not_sent' | 'pending'
 
 /**
  * Whether ``backend``'s session received Kiro Crew's own servers, read off its report.
  *
  * `connected` / `failed` when the harness reported every one started, or one
- * failed. Otherwise it depends on the harness: one that mounts its spec's servers
+ * failed. `no_tools` when one started but gave the session no tools (a tool-name
+ * clash can drop them), so a started server does not read as `connected`. Otherwise it depends on the harness: one that mounts its spec's servers
  * itself reports them, so silence is `pending`; on any other the `session/new`
  * array is the whole delivery, so they were `sent`, or `not_sent` when Crew
  * withheld them. `null` until a session has reported both its backend and a report.
@@ -56,6 +57,7 @@ export function gatewayToolsState(
   if (!report || backend == null) return null
   const states = CONTROL_PLANE_SERVERS.map(name => mcpSessionServerState(name, report))
   if (states.includes('failed')) return 'failed'
+  if (CONTROL_PLANE_SERVERS.some(name => mcpSessionGaveNoTools(name, report))) return 'no_tools'
   if (states.every(state => state === 'started')) return 'connected'
   if (SPEC_SERVERS_OFF_WIRE.includes(backend)) return 'pending'
   return CONTROL_PLANE_SERVERS.every(name => report.configured?.includes(name)) ? 'sent' : 'not_sent'

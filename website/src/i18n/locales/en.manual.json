@@ -2145,6 +2145,7 @@
       "gateway_tools_failed": "{{productName}} tools failed to start in this session. Start a new session to try again.",
       "gateway_tools_sent": "Sent (harness doesn't report status)",
       "gateway_tools_not_sent": "{{productName}} tools were not sent to this session, and nothing here can add them.",
+      "gateway_tools_no_tools": "{{productName}} tools started in this session but gave it no tools, often because another server uses the same tool names.",
       "gateway_tools_pending": "Not reported yet",
       "gateway_tools_missing": "This session has no {{productName}} tools",
       "gateway_tools_missing_short": "No tools",

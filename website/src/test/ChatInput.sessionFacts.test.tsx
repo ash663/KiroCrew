@@ -160,6 +160,17 @@ describe('ChatInput — what the live session reports', () => {
     expect(notice).toHaveAttribute('role', 'alert')
   })
 
+  it('warns when the gateway tools started but gave the session no tools', () => {
+    renderWithProviders(<ChatInput {...props({ sessionBackend: 'kiro', gatewayTools: 'no_tools' })} />)
+    expect(screen.getByTestId('agent-chip-tools-missing')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Context usage' }))
+    // Not `Available`: the server started, but the session has none of its tools.
+    expect(screen.queryByTestId('context-gateway-tools')).toBeNull()
+    const notice = screen.getByTestId('context-gateway-tools-missing')
+    expect(notice.textContent).toContain('Kiro Crew tools started in this session but gave it no tools')
+    expect(notice).toHaveAttribute('role', 'status')
+  })
+
   it('does not warn when the gateway tools reached the session', () => {
     renderWithProviders(<ChatInput {...props({ sessionBackend: 'kiro', gatewayTools: 'connected' })} />)
     expect(screen.queryByTestId('agent-chip-tools-missing')).toBeNull()

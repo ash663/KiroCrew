@@ -6306,6 +6306,7 @@
       "gateway_tools_failed": "{{productName}} 工具未能在此会话中启动。请新建会话后重试。",
       "gateway_tools_sent": "已发送（运行框架不报告状态）",
       "gateway_tools_not_sent": "{{productName}} 工具未发送到此会话，这里也无法添加。",
+      "gateway_tools_no_tools": "{{productName}} 工具已在此会话中启动，但没有提供任何工具，通常是因为另一个服务器使用了相同的工具名称。",
       "gateway_tools_pending": "尚未报告",
       "gateway_tools_missing": "此会话没有 {{productName}} 工具",
       "gateway_tools_missing_short": "无工具",
