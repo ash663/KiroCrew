@@ -279,7 +279,13 @@ authorization. The recipient is resolved by the same check as the drop notice
 self-send, a closed sender, and a reused key held by a different tab. The hard
 stop reports exactly the entries it takes off the queue, before the settle can
 suspend; a send that lands during the settle stays queued and is not reported,
-because it will still run. Best-effort here too: the discard
+because it will still run. The same hard stop drops the turn's pending steers. A
+steer that still holds its admission answered `steered` (a peer steer that
+`agent.peer_steer_loss_recovery` admitted) or requeued, so its sender gets
+`SEND_DISCARD_HARD_STOP_STEER`: the notice says the steer may not have run, since
+the turn may already have read it, and that it will not be queued to run later. A
+steer still in its RPC is skipped, because it answers unavailable and its sender
+queues it. Best-effort here too: the discard
 was already decided by the person or the stop.
 
 **The stamp names a session, not a key, and does not survive a restart.** It
